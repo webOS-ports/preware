@@ -3,7 +3,7 @@
         "application.launcher",
         "networkconnection.management",
         "networkconnection.query",
-        "opkg-service.operation",
+        "ipkg-service.operation",
         "wifi.management",
         "wifi.query"
     ]
