@@ -1,0 +1,4 @@
+{
+ "allowedNames": ["org.webosports.service.ipkg"],
+ "ipkg-service.operation": ["dev"]
+}
