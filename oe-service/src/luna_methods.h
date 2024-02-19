@@ -20,7 +20,7 @@
 #ifndef LUNA_METHODS_H_
 #define LUNA_METHODS_H_
 
-#include <lunaservice.h>
+#include <luna-service2/lunaservice.h>
 
 bool register_methods(LSHandle *serviceHandle, LSError lserror);
 
