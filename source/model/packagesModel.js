@@ -291,7 +291,7 @@ enyo.singleton({
                 this.deviceVersion = device.version;
             }
         }
-        if (!this.deviceVersion || this.deviceVersion === "0.0.0") {
+        if (!this.deviceVersion || this.deviceVersion === "0.0.0" || this.deviceVersion === "00.00.00") {
             console.log("Work around luna-next issue. Setting version to 3.0.5, had version: " + this.deviceVersion);
             this.deviceVersion = "3.0.5";
         }
