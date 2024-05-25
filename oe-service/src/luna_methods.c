@@ -809,7 +809,7 @@ void *update_thread(void *arg) {
 
  end:
   LSMessageUnref(message);
-  return;
+  return NULL;
 
  error:
   LSErrorPrint(&lserror, stderr);
@@ -1529,7 +1529,7 @@ void *feed_download_thread(void *arg) {
 
  end:
   LSMessageUnref(message);
-  return;
+  return NULL;
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
@@ -1926,7 +1926,7 @@ void *appinstaller_install_thread(void *arg) {
 
  end:
   LSMessageUnref(message);
-  return;
+  return NULL;
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
@@ -2003,7 +2003,7 @@ void *opkg_install_thread(void *arg) {
 
  end:
   LSMessageUnref(message);
-  return;
+  return NULL;
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
@@ -2054,7 +2054,7 @@ void *remove_thread(void *arg) {
 
  end:
   LSMessageUnref(message);
-  return;
+  return NULL;
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
@@ -2134,7 +2134,7 @@ void *opkg_replace_thread(void *arg) {
 
  end:
   LSMessageUnref(message);
-  return;
+  return NULL;
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
@@ -2214,7 +2214,7 @@ void *appinstaller_replace_thread(void *arg) {
 
  end:
   LSMessageUnref(message);
-  return;
+  return NULL;
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
