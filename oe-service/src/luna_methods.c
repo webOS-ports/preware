@@ -240,7 +240,9 @@ bool restart_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   LSError lserror;
   LSErrorInit(&lserror);
   (void)LSMessageRespond(message, "{\"returnValue\": true}", &lserror);
-  (void)system("/usr/bin/killall org.webosports.service.ipkg");
+  if (system("/usr/bin/killall org.webosports.service.ipkg") != 0) {
+    fprintf(stderr, "Unable to restart the service\n");
+  }
   // It's likely that this point will never be reached.
   return true;
 }
@@ -275,9 +277,10 @@ static bool downloadstats(char *message) {
   char togo[MAXNUMLEN];
   char speed[MAXNUMLEN];
 
-  // Check for curl progress messages, and extract the relevant data
-  if ((sscanf(message, "%*s %s %*s %s %*s %*s %*s %*s %*s %*s %s %s",
-	      &total, &current, &togo, &speed) == 4) &&
+  // Check for curl progress messages, and extract the relevant data.
+  // The widths keep each field inside its MAXNUMLEN sized buffer.
+  if ((sscanf(message, "%*s %31s %*s %31s %*s %*s %*s %*s %*s %*s %31s %31s",
+	      total, current, togo, speed) == 4) &&
       // Ignore the first line and initial fetch latency
       strcmp(speed, "0") && strcmp(speed, "Current")) {
     // Format in a short human-readable format.
@@ -322,7 +325,7 @@ static bool appinstaller(char *message) {
 
   // Check for appinstaller progress messages, and extract the relevant data
   if ((sscanf(message, "%*s %*s %*s %*s %*s { %*s , \"status\":\"%s }",
-	      &status) == 1)) {
+	      status) == 1)) {
 
     // The last string field will still have the ending ", so remove that.
     status[strlen(status)-1] = '\0';
@@ -655,7 +658,8 @@ bool set_auth_params_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
     return true;
   }
 
-  strncpy(device, json_object_get_string(id), MAXNAMLEN);
+  // g_strlcpy guarantees a terminated (if necessary, truncated) copy.
+  g_strlcpy(device, json_object_get_string(id), MAXNAMLEN);
 
   // Extract the token argument from the message
   id = json_object_object_get(object, "token");
@@ -666,7 +670,8 @@ bool set_auth_params_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
     return true;
   }
 
-  strncpy(token, json_object_get_string(id), MAXNAMLEN);
+  // g_strlcpy guarantees a terminated (if necessary, truncated) copy.
+  g_strlcpy(token, json_object_get_string(id), MAXNAMLEN);
 
   if (!LSMessageRespond(message, "{\"returnValue\": true}", &lserror)) goto error;
 
@@ -857,7 +862,7 @@ void *update_thread(void *arg) {
   DIR *dp = opendir ("/media/cryptofs/apps/var/lib/opkg/lists/");
   if (dp) {
     struct dirent *ep;
-    while (ep = readdir (dp)) {
+    while ((ep = readdir (dp)) != NULL) {
       if (strcmp(ep->d_name, ".") && strcmp(ep->d_name, "..")) {
 	anyfeeds = true;
       }
@@ -1046,10 +1051,18 @@ bool get_package_info_method(LSHandle *lshandle, LSMessage *message, void *ctx) 
 			&lserror)) goto error;
   }
 
-  while (name = g_dir_read_name(dir)) {
+  while ((name = g_dir_read_name(dir)) != NULL) {
     int i = 0;
-    asprintf(&filename, "/media/cryptofs/apps/var/lib/opkg/cache/%s", name);
+    if (asprintf(&filename, "/media/cryptofs/apps/var/lib/opkg/cache/%s", name) == -1) {
+      filename = NULL;
+      continue;
+    }
     ret = g_file_get_contents(filename, &contents, &length, NULL);
+    g_free(filename);
+    filename = NULL;
+
+    // Skip any feed list that cannot be read.
+    if (!ret) continue;
 
     packages = g_strsplit(contents, "\nPackage: ", -1);
     while (packages[i]) {
@@ -1058,15 +1071,14 @@ bool get_package_info_method(LSHandle *lshandle, LSMessage *message, void *ctx) 
       if (!bcmp(json_object_get_string(id), &packages[i][offset], len) &&
           (packages[i][offset + len] == '\n')) {
         package = packages[i];
-	asprintf(&feedname, "%s", name);
+	g_free(feedname);
+	if (asprintf(&feedname, "%s", name) == -1) feedname = NULL;
       }
       i++;
     }
 
     g_free(contents);
   }
-
-  g_free(filename);
 
   g_dir_close(dir);
 
@@ -1075,11 +1087,14 @@ bool get_package_info_method(LSHandle *lshandle, LSMessage *message, void *ctx) 
           "{\"returnValue\": true, \"size\": 0, \"contents\": \"\"}", &lserror)) {
       goto error;
     }
+    g_free(feedname);
+    g_strfreev(packages);
+    return true;
   }
 
   if (sprintf(read_file_buffer,
-	      "{\"returnValue\": true, \"feed\": \"%s\", \"filesize\": %d, \"chunksize\": %d, \"stage\": \"start\"}",
-	      feedname, strlen(package)+10, chunksize)) {
+	      "{\"returnValue\": true, \"feed\": \"%s\", \"filesize\": %zu, \"chunksize\": %d, \"stage\": \"start\"}",
+	      feedname ? feedname : "", strlen(package)+10, chunksize)) {
     if (!LSMessageRespond(message, read_file_buffer, &lserror)) goto error;
   }
 
@@ -1222,7 +1237,7 @@ bool get_dir_listing_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   strcpy(buffer, "{");
 
   // Loop through the list of directory entries.
-  while (ep = readdir(dp)) {
+  while ((ep = readdir(dp)) != NULL) {
 
     // Start or continue the JSON array
     if (first) {
@@ -1484,7 +1499,7 @@ bool delete_config_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
 // local to this call or serialised.  It uses its own command_buffers rather
 // than the process-wide statics, and replies under the respond mutex.
 //
-bool do_download(LSMessage *message, bool gzipped, char *feed, char *url) {
+bool do_download(LSMessage *message, bool gzipped, const char *feed, const char *url) {
   LSError lserror;
   LSErrorInit(&lserror);
 
@@ -1658,7 +1673,7 @@ bool feed_download_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   return false;
 }
 
-bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool useSvc) {
+bool do_install(LSMessage *message, const char *filename, const char *pkg, const char *url, bool useSvc) {
   LSError lserror;
   LSErrorInit(&lserror);
 
@@ -1727,7 +1742,9 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
 	   "/usr/bin/ar p %s control.tar.gz | /bin/tar -O -z -x --no-anchored -f - control | /bin/sed -n -e 's/^Package: //p' 2>&1", pathname);
   strcpy(run_command_buffer, "");
   if (run_command(command, NULL, NULL) && strlen(run_command_buffer)) {
-    strcpy(package, run_command_buffer);
+    // A bounded copy: the command output comes from the package file itself,
+    // so it cannot be trusted to fit in a MAXNAMLEN sized package name.
+    g_strlcpy(package, run_command_buffer, sizeof(package));
     strcpy(buffer, "{\"stdOut\": [\"");
     strcat(buffer, run_command_buffer);
     strcat(buffer, "\"], \"returnValue\": true, \"stage\": \"identify\"}");
@@ -1767,7 +1784,8 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
 
   /* Check for an opkg prerm script, and install it */
 
-  char prerm[MAXLINLEN];
+  // Room for the longest script path around a MAXNAMLEN sized package name.
+  char prerm[MAXNAMLEN+128];
   sprintf(prerm, "/media/cryptofs/apps/.scripts/%s/pmPreRemove.script", package);
 
   // Does the package already have a pmPreRemove script?
@@ -1809,7 +1827,8 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
 
   /* Check for an opkg postinst script, and run it */
 
-  char postinst[MAXLINLEN];
+  // Room for the longest script path around a MAXNAMLEN sized package name.
+  char postinst[MAXNAMLEN+128];
   sprintf(postinst, "/media/cryptofs/apps/.scripts/%s/pmPostInstall.script", package);
 
   // Has the service already executed a postinst script?
@@ -1819,7 +1838,9 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
     sprintf(postinst, "/media/cryptofs/apps/var/lib/opkg/info/%s.postinst", package);
     if (!stat(postinst, &info)) {
 
-      (void)system("/bin/mount -o remount,rw /");
+      if (system("/bin/mount -o remount,rw /") != 0) {
+	fprintf(stderr, "Unable to remount / read-write\n");
+      }
 
       snprintf(command, MAXLINLEN,
 	       "OPKG_OFFLINE_ROOT=/media/cryptofs/apps /bin/sh %s 2>&1", postinst);
@@ -1888,7 +1909,7 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
   return false;
 }
 
-bool do_remove(LSMessage *message, char *package, bool replace, bool *removed) {
+bool do_remove(LSMessage *message, const char *package, bool replace, bool *removed) {
   LSError lserror;
   LSErrorInit(&lserror);
 
@@ -1899,12 +1920,15 @@ bool do_remove(LSMessage *message, char *package, bool replace, bool *removed) {
   struct stat info;
 
   // Check for an opkg prerm script
-  char prerm[MAXLINLEN];
+  // Room for the longest script path around a MAXNAMLEN sized package name.
+  char prerm[MAXNAMLEN+128];
   sprintf(prerm, "/media/cryptofs/apps/var/lib/opkg/info/%s.prerm", package);
 
   if (!stat(prerm, &info)) {
 
-    (void)system("/bin/mount -o remount,rw /");
+    if (system("/bin/mount -o remount,rw /") != 0) {
+      fprintf(stderr, "Unable to remount / read-write\n");
+    }
 
     snprintf(command, MAXLINLEN,
 	     "OPKG_OFFLINE_ROOT=/media/cryptofs/apps /bin/sh %s 2>&1", prerm);
@@ -2532,7 +2556,7 @@ bool impersonate_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   char uri[MAXLINLEN];
   sprintf(uri, "luna://%s/%s", json_object_get_string(service), json_object_get_string(method));
 
-  char *paramstring = NULL;
+  const char *paramstring = NULL;
   paramstring = json_object_to_json_string(params);
   if (!LSCallFromApplication(serviceHandle, uri, paramstring, json_object_get_string(id),
 			     impersonate_handler, message, NULL, &lserror)) goto error;
