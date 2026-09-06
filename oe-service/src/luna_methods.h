@@ -24,12 +24,20 @@
 
 bool register_methods(LSHandle *serviceHandle, LSError lserror);
 
-// Twice the chunk size (so any character can be escaped), plus a terminating null.
-#define MAXBUFLEN 8193
-// Size of file chunks to pass back up to webOS.
-#define CHUNKSIZE 4096
 // Max size of any text line in a config file and elsewhere.
 #define MAXLINLEN 4096
+// Buffer for command output.  Commands are read a line at a time, and the
+// worst case for escaping a line is six bytes out per byte in (\u00xx), so
+// this has room for any fully escaped MAXLINLEN line plus the JSON wrapping
+// around it.
+#define MAXBUFLEN (MAXLINLEN*6+2049)
+// Size of file chunks to pass back up to webOS.  Every chunk costs a luna
+// round trip and a JSON parse on the webOS side, and the feed lists run to
+// well over a megabyte, so this wants to be big.  The buffers that hold an
+// escaped chunk are sized from it rather than from MAXBUFLEN.
+#define CHUNKSIZE 16384
+// Worst case size of a chunk once escaped, plus a terminating null.
+#define ESCCHUNKSIZE (CHUNKSIZE*6+1)
 // Max size of a version number or size string.
 #define MAXNUMLEN   32
 
