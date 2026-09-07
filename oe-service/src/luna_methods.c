@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <pthread.h>
 
 #include <json.h>
 
@@ -30,7 +31,9 @@
 
 #define ALLOWED_CHARS "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-+_"
 
-#define API_VERSION "17"
+// 18 is the first version where downloadFeed is safe to call for several feeds
+// at once.  Preware checks for it before downloading feeds in parallel.
+#define API_VERSION "18"
 
 //
 // We use static buffers instead of continually allocating and deallocating stuff,
@@ -39,11 +42,42 @@
 static char buffer[MAXBUFLEN];
 static char esc_buffer[MAXBUFLEN];
 static char run_command_buffer[MAXBUFLEN];
-static char read_file_buffer[CHUNKSIZE+CHUNKSIZE+1];
+// The file readers ship much larger pieces than a command line, so they get
+// their own buffers rather than sharing the MAXBUFLEN ones above.
+static char read_file_buffer[ESCCHUNKSIZE+256];
+static char read_esc_buffer[ESCCHUNKSIZE];
 
 // These are used for CDN downloads
 static char device[MAXNAMLEN];
 static char token[MAXNAMLEN];
+
+//
+// Feed downloads run in their own threads, and Preware may start several of
+// them at once, so they cannot use the static buffers above without scribbling
+// over each other.  Each download allocates one of these instead, and uses the
+// reentrant _r variants of the helpers below.  Everything else in this service
+// is called one operation at a time by the app, and still uses the statics.
+//
+typedef struct {
+  char out[MAXBUFLEN];		// accumulates the command output for the reply
+  char esc[MAXBUFLEN];		// scratch used when escaping strings into JSON
+  char msg[MAXBUFLEN];		// scratch used when building a reply message
+} command_buffers;
+
+//
+// liblunaservice makes no promise about being called from several threads at
+// once, so the parallel downloads hold this while they reply.  Only the reply
+// is serialised, which is brief; the downloads themselves still run alongside
+// each other, which is where all of the time actually goes.
+//
+static pthread_mutex_t respond_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static bool locked_respond(LSMessage *message, const char *reply, LSError *lserror) {
+  pthread_mutex_lock(&respond_mutex);
+  bool returnValue = LSMessageRespond(message, reply, lserror);
+  pthread_mutex_unlock(&respond_mutex);
+  return returnValue;
+}
 
 static bool access_denied(LSMessage *message) {
   LSError lserror;
@@ -64,21 +98,22 @@ static bool access_denied(LSMessage *message) {
 //
 // Escape a string so that it can be used directly in a JSON response.
 // In general, this means escaping quotes, backslashes and control chars.
-// It uses the static esc_buffer, which must be twice as large as the
-// largest string this routine can handle.
+// It writes into the supplied escape buffer, which must be large enough
+// for the worst case expansion of the input string.
 //
-static char *json_escape_str(char *str)
+static char *json_escape_str_r(char *escbuf, size_t esccap, char *str)
 {
   const char *json_hex_chars = "0123456789abcdef";
 
   // Initialise the output buffer
-  strcpy(esc_buffer, "");
+  strcpy(escbuf, "");
 
-  // Check the constraints on the input string
-  if (strlen(str) > MAXBUFLEN) return (char *)esc_buffer;
+  // Check the constraints on the input string.  A control character becomes
+  // six bytes (\u00xx), so that is the expansion we have to have room for.
+  if ((strlen(str) * 6 + 1) > esccap) return escbuf;
 
   // Initialise the pointers used to step through the input and output.
-  char *resultsPt = (char *)esc_buffer;
+  char *resultsPt = escbuf;
   int pos = 0, start_offset = 0;
 
   // Traverse the input, copying to the output in the largest chunks
@@ -151,7 +186,17 @@ static char *json_escape_str(char *str)
   memcpy(resultsPt, "\0", 1);
 
   // and return a pointer to it.
-  return (char *)esc_buffer;
+  return escbuf;
+}
+
+//
+// Escape a string using the process-wide static buffer.  Safe for everything
+// that is called one operation at a time, which is everything except the
+// feed downloads.
+//
+static char *json_escape_str(char *str)
+{
+  return json_escape_str_r(esc_buffer, MAXBUFLEN, str);
 }
 
 //
@@ -195,7 +240,9 @@ bool restart_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   LSError lserror;
   LSErrorInit(&lserror);
   (void)LSMessageRespond(message, "{\"returnValue\": true}", &lserror);
-  (void)system("/usr/bin/killall org.webosports.service.ipkg");
+  if (system("/usr/bin/killall org.webosports.service.ipkg") != 0) {
+    fprintf(stderr, "Unable to restart the service\n");
+  }
   // It's likely that this point will never be reached.
   return true;
 }
@@ -230,9 +277,10 @@ static bool downloadstats(char *message) {
   char togo[MAXNUMLEN];
   char speed[MAXNUMLEN];
 
-  // Check for curl progress messages, and extract the relevant data
-  if ((sscanf(message, "%*s %s %*s %s %*s %*s %*s %*s %*s %*s %s %s",
-	      &total, &current, &togo, &speed) == 4) &&
+  // Check for curl progress messages, and extract the relevant data.
+  // The widths keep each field inside its MAXNUMLEN sized buffer.
+  if ((sscanf(message, "%*s %31s %*s %31s %*s %*s %*s %*s %*s %*s %31s %31s",
+	      total, current, togo, speed) == 4) &&
       // Ignore the first line and initial fetch latency
       strcmp(speed, "0") && strcmp(speed, "Current")) {
     // Format in a short human-readable format.
@@ -277,7 +325,7 @@ static bool appinstaller(char *message) {
 
   // Check for appinstaller progress messages, and extract the relevant data
   if ((sscanf(message, "%*s %*s %*s %*s %*s { %*s , \"status\":\"%s }",
-	      &status) == 1)) {
+	      status) == 1)) {
 
     // The last string field will still have the ending ", so remove that.
     status[strlen(status)-1] = '\0';
@@ -303,10 +351,13 @@ static bool appinstaller(char *message) {
 //
 // Run a shell command, and return the output in-line in a buffer for returning to webOS.
 // If message and subscriber are defined, then also send back status messages.
-// The global run_command_buffer must be initialised before calling this function.
+// The outbuf must be initialised before calling this function.  The escbuf and
+// msgbuf are scratch space, and must be distinct from outbuf and each other.
+// If locked is set, replies are serialised against the other threads.
 // The return value says whether the command executed successfully or not.
 //
-static bool run_command(char *command, LSMessage *message, subscribefun subscriber) {
+static bool run_command_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
+			  char *command, LSMessage *message, subscribefun subscriber) {
   LSError lserror;
   LSErrorInit(&lserror);
 
@@ -314,8 +365,8 @@ static bool run_command(char *command, LSMessage *message, subscribefun subscrib
   char line[MAXLINLEN];
   char lastline[MAXLINLEN];
 
-  // run_command_buffer is assumed to be initialised, ready for strcat to append.
-  char *lastpos = run_command_buffer+strlen(run_command_buffer);
+  // outbuf is assumed to be initialised, ready for strcat to append.
+  char *lastpos = outbuf+strlen(outbuf);
 
   // Is this the first line of output?
   bool first = true;
@@ -366,11 +417,11 @@ static bool run_command(char *command, LSMessage *message, subscribefun subscrib
     // If we read something, then process it
     if (len) {
 
-      lastpos = run_command_buffer+strlen(run_command_buffer);
+      lastpos = outbuf+strlen(outbuf);
 
       // Add formatting breaks between lines
       if (first) {
-	if (run_command_buffer[strlen(run_command_buffer)-1] == '[') {
+	if (outbuf[strlen(outbuf)-1] == '[') {
 	  array = true;
 	}
 	first = false;
@@ -378,10 +429,10 @@ static bool run_command(char *command, LSMessage *message, subscribefun subscrib
       }
       else {
 	if (array) {
-	  strcat(run_command_buffer, ", ");
+	  strcat(outbuf, ", ");
 	}
 	else {
-	  strcat(run_command_buffer, "<br>");
+	  strcat(outbuf, "<br>");
 	}
 	lastfirst = false;
       }
@@ -393,7 +444,7 @@ static bool run_command(char *command, LSMessage *message, subscribefun subscrib
 	if (strcmp(line, lastline)) {
 
 	  // Copy into a new local buffer for possible modification
-	  // cause we want the original to be return in run_command_buffer.
+	  // cause we want the original to be return in outbuf.
 	  char newline[MAXLINLEN];
 	  strcpy(newline, line);
 
@@ -404,12 +455,17 @@ static bool run_command(char *command, LSMessage *message, subscribefun subscrib
 	  if (strlen(newline)) {
 
 	    // Send it as a status message.
-	    strcpy(buffer, "{\"returnValue\": true, \"stage\": \"status\", \"status\": \"");
-	    strcat(buffer, json_escape_str(newline));
-	    strcat(buffer, "\"}");
+	    strcpy(msgbuf, "{\"returnValue\": true, \"stage\": \"status\", \"status\": \"");
+	    strcat(msgbuf, json_escape_str_r(escbuf, MAXBUFLEN, newline));
+	    strcat(msgbuf, "\"}");
 
 	    // %%% Should we break out of the loop here, or just ignore the error? %%%
-	    if (!LSMessageRespond(message, buffer, &lserror)) goto error;
+	    if (locked) {
+	      if (!locked_respond(message, msgbuf, &lserror)) goto error;
+	    }
+	    else {
+	      if (!LSMessageRespond(message, msgbuf, &lserror)) goto error;
+	    }
 
 	  }
 
@@ -421,13 +477,13 @@ static bool run_command(char *command, LSMessage *message, subscribefun subscrib
 	}
       }
 
-      // Append the unfiltered output to the run_command_buffer.
+      // Append the unfiltered output to the outbuf.
       if (array) {
-	strcat(run_command_buffer, "\"");
+	strcat(outbuf, "\"");
       }
-      strcat(run_command_buffer, json_escape_str(line));
+      strcat(outbuf, json_escape_str_r(escbuf, MAXBUFLEN, line));
       if (array) {
-	strcat(run_command_buffer, "\"");
+	strcat(outbuf, "\"");
       }
     }
   }
@@ -447,46 +503,71 @@ static bool run_command(char *command, LSMessage *message, subscribefun subscrib
 }
 
 //
+// Run a shell command using the process-wide static buffers.  Safe for
+// everything that is called one operation at a time, which is everything
+// except the feed downloads.  The global run_command_buffer must be
+// initialised first.
+//
+static bool run_command(char *command, LSMessage *message, subscribefun subscriber) {
+  return run_command_r(run_command_buffer, esc_buffer, buffer, false,
+		       command, message, subscriber);
+}
+
+//
 // Send a standard format command failure message back to webOS.
 // The command will be escaped.  The output argument should be a JSON array and is not escaped.
 // The additional text  will not be escaped.
 // The return value is from the LSMessageRespond call, not related to the command execution.
 //
-static bool report_command_failure(LSMessage *message, char *command, char *stdErrText, char *additional) {
+static bool report_command_failure_r(char *msgbuf, char *escbuf, bool locked,
+				     LSMessage *message, char *command, char *stdErrText, char *additional) {
   LSError lserror;
   LSErrorInit(&lserror);
 
   // Include the command that was executed, in escaped form.
-  snprintf(buffer, MAXBUFLEN,
+  snprintf(msgbuf, MAXBUFLEN,
 	   "{\"errorText\": \"Unable to run command: %s\"",
-	   json_escape_str(command));
+	   json_escape_str_r(escbuf, MAXBUFLEN, command));
 
   // Include any stderr fields from the command.
   if (stdErrText) {
-    strcat(buffer, ", \"stdErr\": ");
-    strcat(buffer, stdErrText);
+    strcat(msgbuf, ", \"stdErr\": ");
+    strcat(msgbuf, stdErrText);
   }
 
   // Report that an error occurred.
-  strcat(buffer, ", \"returnValue\": false, \"errorCode\": -1");
+  strcat(msgbuf, ", \"returnValue\": false, \"errorCode\": -1");
 
   // Add any additional JSON fields.
   if (additional) {
-    strcat(buffer, ", ");
-    strcat(buffer, additional);
+    strcat(msgbuf, ", ");
+    strcat(msgbuf, additional);
   }
 
   // Terminate the JSON reply message ...
-  strcat(buffer, "}");
+  strcat(msgbuf, "}");
 
   // and send it.
-  if (!LSMessageRespond(message, buffer, &lserror)) goto error;
+  if (locked) {
+    if (!locked_respond(message, msgbuf, &lserror)) goto error;
+  }
+  else {
+    if (!LSMessageRespond(message, msgbuf, &lserror)) goto error;
+  }
 
   return true;
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
   return false;
+}
+
+//
+// Report a command failure using the process-wide static buffers.
+//
+static bool report_command_failure(LSMessage *message, char *command, char *stdErrText, char *additional) {
+  return report_command_failure_r(buffer, esc_buffer, false,
+				  message, command, stdErrText, additional);
 }
 
 //
@@ -577,7 +658,8 @@ bool set_auth_params_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
     return true;
   }
 
-  strncpy(device, json_object_get_string(id), MAXNAMLEN);
+  // g_strlcpy guarantees a terminated (if necessary, truncated) copy.
+  g_strlcpy(device, json_object_get_string(id), MAXNAMLEN);
 
   // Extract the token argument from the message
   id = json_object_object_get(object, "token");
@@ -588,7 +670,8 @@ bool set_auth_params_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
     return true;
   }
 
-  strncpy(token, json_object_get_string(id), MAXNAMLEN);
+  // g_strlcpy guarantees a terminated (if necessary, truncated) copy.
+  g_strlcpy(token, json_object_get_string(id), MAXNAMLEN);
 
   if (!LSMessageRespond(message, "{\"returnValue\": true}", &lserror)) goto error;
 
@@ -779,7 +862,7 @@ void *update_thread(void *arg) {
   DIR *dp = opendir ("/media/cryptofs/apps/var/lib/opkg/lists/");
   if (dp) {
     struct dirent *ep;
-    while (ep = readdir (dp)) {
+    while ((ep = readdir (dp)) != NULL) {
       if (strcmp(ep->d_name, ".") && strcmp(ep->d_name, "..")) {
 	anyfeeds = true;
       }
@@ -857,7 +940,7 @@ static bool read_file(LSMessage *message, char *filename) {
     return true;
   }
 
-  char chunk[CHUNKSIZE];
+  char chunk[CHUNKSIZE+1];	// +1 so a full read can still be terminated
   int chunksize = CHUNKSIZE;
 
   fprintf(stderr, "Reading file %s\n", filename);
@@ -880,7 +963,7 @@ static bool read_file(LSMessage *message, char *filename) {
     datasize += size;
     chunk[size] = '\0';
     sprintf(read_file_buffer, "{\"returnValue\": true, \"size\": %d, \"contents\": \"", size);
-    strcat(read_file_buffer, json_escape_str(chunk));
+    strcat(read_file_buffer, json_escape_str_r(read_esc_buffer, ESCCHUNKSIZE, chunk));
     strcat(read_file_buffer, "\", \"stage\": \"middle\"}");
 
     if (!LSMessageRespond(message, read_file_buffer, &lserror)) goto error;
@@ -946,7 +1029,7 @@ bool get_package_info_method(LSHandle *lshandle, LSMessage *message, void *ctx) 
   gchar *contents = NULL;
   gsize length;
   gboolean ret;
-  char chunk[CHUNKSIZE];
+  char chunk[CHUNKSIZE+1];	// +1 so a full read can still be terminated
   int chunksize = CHUNKSIZE;
   int size;
   int datasize = 0;
@@ -968,10 +1051,18 @@ bool get_package_info_method(LSHandle *lshandle, LSMessage *message, void *ctx) 
 			&lserror)) goto error;
   }
 
-  while (name = g_dir_read_name(dir)) {
+  while ((name = g_dir_read_name(dir)) != NULL) {
     int i = 0;
-    asprintf(&filename, "/media/cryptofs/apps/var/lib/opkg/cache/%s", name);
+    if (asprintf(&filename, "/media/cryptofs/apps/var/lib/opkg/cache/%s", name) == -1) {
+      filename = NULL;
+      continue;
+    }
     ret = g_file_get_contents(filename, &contents, &length, NULL);
+    g_free(filename);
+    filename = NULL;
+
+    // Skip any feed list that cannot be read.
+    if (!ret) continue;
 
     packages = g_strsplit(contents, "\nPackage: ", -1);
     while (packages[i]) {
@@ -980,15 +1071,14 @@ bool get_package_info_method(LSHandle *lshandle, LSMessage *message, void *ctx) 
       if (!bcmp(json_object_get_string(id), &packages[i][offset], len) &&
           (packages[i][offset + len] == '\n')) {
         package = packages[i];
-	asprintf(&feedname, "%s", name);
+	g_free(feedname);
+	if (asprintf(&feedname, "%s", name) == -1) feedname = NULL;
       }
       i++;
     }
 
     g_free(contents);
   }
-
-  g_free(filename);
 
   g_dir_close(dir);
 
@@ -997,21 +1087,25 @@ bool get_package_info_method(LSHandle *lshandle, LSMessage *message, void *ctx) 
           "{\"returnValue\": true, \"size\": 0, \"contents\": \"\"}", &lserror)) {
       goto error;
     }
+    g_free(feedname);
+    g_strfreev(packages);
+    return true;
   }
 
   if (sprintf(read_file_buffer,
-	      "{\"returnValue\": true, \"feed\": \"%s\", \"filesize\": %d, \"chunksize\": %d, \"stage\": \"start\"}",
-	      feedname, strlen(package)+10, chunksize)) {
+	      "{\"returnValue\": true, \"feed\": \"%s\", \"filesize\": %zu, \"chunksize\": %d, \"stage\": \"start\"}",
+	      feedname ? feedname : "", strlen(package)+10, chunksize)) {
     if (!LSMessageRespond(message, read_file_buffer, &lserror)) goto error;
   }
 
   while (package && datasize < strlen(package)) {
     size = MIN(strlen(&package[datasize]) + strlen("\nPackage: "), chunksize);
     bcopy(&package[datasize], chunk, size);
+    chunk[size] = '\0';
     sprintf(read_file_buffer, "{\"returnValue\": true, \"size\": %d, \"contents\": \"", size);
     if (!datasize)
       strcat(read_file_buffer, "Package: ");
-    strcat(read_file_buffer, json_escape_str(chunk));
+    strcat(read_file_buffer, json_escape_str_r(read_esc_buffer, ESCCHUNKSIZE, chunk));
     strcat(read_file_buffer, "\"");
     strcat(read_file_buffer, ", \"stage\": \"middle\"");
     strcat(read_file_buffer, "}");
@@ -1143,7 +1237,7 @@ bool get_dir_listing_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   strcpy(buffer, "{");
 
   // Loop through the list of directory entries.
-  while (ep = readdir(dp)) {
+  while ((ep = readdir(dp)) != NULL) {
 
     // Start or continue the JSON array
     if (first) {
@@ -1399,9 +1493,17 @@ bool delete_config_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   return false;
 }
 
-bool do_download(LSMessage *message, bool gzipped, char *feed, char *url) {
+//
+// Download a single feed.  Runs in its own thread, possibly alongside other
+// feeds Preware has in flight, so everything it touches has to be either
+// local to this call or serialised.  It uses its own command_buffers rather
+// than the process-wide statics, and replies under the respond mutex.
+//
+bool do_download(LSMessage *message, bool gzipped, const char *feed, const char *url) {
   LSError lserror;
   LSErrorInit(&lserror);
+
+  bool returnValue = false;
 
   char command[MAXLINLEN];
 
@@ -1409,6 +1511,16 @@ bool do_download(LSMessage *message, bool gzipped, char *feed, char *url) {
   sprintf(pathname, "/media/cryptofs/apps/var/lib/opkg/cache/%s", feed);
 
   char headers[MAXLINLEN];
+
+  // Too big to sit on the thread stack, and needed for the whole call.
+  command_buffers *bufs = malloc(sizeof(command_buffers));
+  if (!bufs) {
+    (void)locked_respond(message,
+			 "{\"returnValue\": false, \"errorCode\": -1, "
+			 "\"errorText\": \"Out of memory\", \"stage\": \"failed\"}",
+			 &lserror);
+    return false;
+  }
 
   if (!strncmp(url, "https://", 8)) {
     snprintf(headers, MAXLINLEN,
@@ -1432,15 +1544,16 @@ bool do_download(LSMessage *message, bool gzipped, char *feed, char *url) {
 	     headers, url);
   }
 
-  strcpy(run_command_buffer, "{\"stdOut\": [");
-  if (run_command(command, message, verifyheader)) {
-    strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"verify\"}");
-    if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
+  strcpy(bufs->out, "{\"stdOut\": [");
+  if (run_command_r(bufs->out, bufs->esc, bufs->msg, true, command, message, verifyheader)) {
+    strcat(bufs->out, "], \"returnValue\": true, \"stage\": \"verify\"}");
+    if (!locked_respond(message, bufs->out, &lserror)) goto error;
   }
   else {
-    strcat(run_command_buffer, "]");
-    if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"failed\"")) goto end;
-    return false;
+    strcat(bufs->out, "]");
+    (void)report_command_failure_r(bufs->msg, bufs->esc, true,
+				   message, command, bufs->out+11, "\"stage\": \"failed\"");
+    goto end;
   }
 
   /* Download the file */
@@ -1456,23 +1569,27 @@ bool do_download(LSMessage *message, bool gzipped, char *feed, char *url) {
 	     headers, pathname, url);
   }
 
-  strcpy(run_command_buffer, "{\"stdOut\": [");
-  if (run_command(command, message, downloadstats)) {
-    strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"download\"}");
-    if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
+  strcpy(bufs->out, "{\"stdOut\": [");
+  if (run_command_r(bufs->out, bufs->esc, bufs->msg, true, command, message, downloadstats)) {
+    strcat(bufs->out, "], \"returnValue\": true, \"stage\": \"download\"}");
+    if (!locked_respond(message, bufs->out, &lserror)) goto error;
   }
   else {
-    strcat(run_command_buffer, "]");
-    if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"failed\"")) goto end;
-    return false;
+    strcat(bufs->out, "]");
+    (void)report_command_failure_r(bufs->msg, bufs->esc, true,
+				   message, command, bufs->out+11, "\"stage\": \"failed\"");
+    goto end;
   }
 
-  return true;
+  returnValue = true;
+  goto end;
+
  error:
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
  end:
-  return false;
+  free(bufs);
+  return returnValue;
 }
 
 
@@ -1487,11 +1604,11 @@ void *feed_download_thread(void *arg) {
   // Extract the gzipped argument from the message
   json_object *gzipped = json_object_object_get(object, "gzipped");
   if (!gzipped || !json_object_is_type(gzipped, json_type_boolean)) {
-    if (!LSMessageRespond(message,
-			  "{\"returnValue\": false, \"errorCode\": -1, "
-			  "\"errorText\": \"Invalid or missing gzipped parameter\", "
-			  "\"stage\": \"failed\"}",
-			  &lserror)) goto error;
+    if (!locked_respond(message,
+			"{\"returnValue\": false, \"errorCode\": -1, "
+			"\"errorText\": \"Invalid or missing gzipped parameter\", "
+			"\"stage\": \"failed\"}",
+			&lserror)) goto error;
     goto end;
   }
 
@@ -1500,7 +1617,7 @@ void *feed_download_thread(void *arg) {
   if (!feed || !json_object_is_type(feed, json_type_string) ||
       (strlen(json_object_get_string(feed)) >= MAXNAMLEN) ||
       (strspn(json_object_get_string(feed), ALLOWED_CHARS) != strlen(json_object_get_string(feed)))) {
-    if (!LSMessageRespond(message,
+    if (!locked_respond(message,
 			"{\"returnValue\": false, \"errorCode\": -1, "
 			"\"errorText\": \"Invalid or missing feed parameter\", "
 			"\"stage\": \"failed\"}",
@@ -1512,7 +1629,7 @@ void *feed_download_thread(void *arg) {
   json_object *url = json_object_object_get(object, "url");
   if (!url || !json_object_is_type(url, json_type_string) ||
       (strlen(json_object_get_string(url)) >= MAXLINLEN)) {
-    if (!LSMessageRespond(message,
+    if (!locked_respond(message,
 			"{\"returnValue\": false, \"errorCode\": -1, "
 			"\"errorText\": \"Invalid or missing url parameter\", "
 			"\"stage\": \"failed\"}",
@@ -1524,7 +1641,7 @@ void *feed_download_thread(void *arg) {
 		  json_object_get_boolean(gzipped) ? true : false,
 		  json_object_get_string(feed),
 		  json_object_get_string(url))) {
-    if (!LSMessageRespond(message, "{\"returnValue\": true, \"stage\": \"completed\"}", &lserror)) goto error;
+    if (!locked_respond(message, "{\"returnValue\": true, \"stage\": \"completed\"}", &lserror)) goto error;
   }
 
  end:
@@ -1545,7 +1662,7 @@ bool feed_download_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   LSMessageRef(message);
 
   // Report that the update operaton has begun
-  if (!LSMessageRespond(message, "{\"returnValue\": true, \"stage\": \"begin\"}", &lserror)) goto error;
+  if (!locked_respond(message, "{\"returnValue\": true, \"stage\": \"begin\"}", &lserror)) goto error;
 
   pthread_create(&tid, NULL, feed_download_thread, (void *)message);
 
@@ -1556,7 +1673,7 @@ bool feed_download_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   return false;
 }
 
-bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool useSvc) {
+bool do_install(LSMessage *message, const char *filename, const char *pkg, const char *url, bool useSvc) {
   LSError lserror;
   LSErrorInit(&lserror);
 
@@ -1625,7 +1742,9 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
 	   "/usr/bin/ar p %s control.tar.gz | /bin/tar -O -z -x --no-anchored -f - control | /bin/sed -n -e 's/^Package: //p' 2>&1", pathname);
   strcpy(run_command_buffer, "");
   if (run_command(command, NULL, NULL) && strlen(run_command_buffer)) {
-    strcpy(package, run_command_buffer);
+    // A bounded copy: the command output comes from the package file itself,
+    // so it cannot be trusted to fit in a MAXNAMLEN sized package name.
+    g_strlcpy(package, run_command_buffer, sizeof(package));
     strcpy(buffer, "{\"stdOut\": [\"");
     strcat(buffer, run_command_buffer);
     strcat(buffer, "\"], \"returnValue\": true, \"stage\": \"identify\"}");
@@ -1665,7 +1784,8 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
 
   /* Check for an opkg prerm script, and install it */
 
-  char prerm[MAXLINLEN];
+  // Room for the longest script path around a MAXNAMLEN sized package name.
+  char prerm[MAXNAMLEN+128];
   sprintf(prerm, "/media/cryptofs/apps/.scripts/%s/pmPreRemove.script", package);
 
   // Does the package already have a pmPreRemove script?
@@ -1707,7 +1827,8 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
 
   /* Check for an opkg postinst script, and run it */
 
-  char postinst[MAXLINLEN];
+  // Room for the longest script path around a MAXNAMLEN sized package name.
+  char postinst[MAXNAMLEN+128];
   sprintf(postinst, "/media/cryptofs/apps/.scripts/%s/pmPostInstall.script", package);
 
   // Has the service already executed a postinst script?
@@ -1717,7 +1838,9 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
     sprintf(postinst, "/media/cryptofs/apps/var/lib/opkg/info/%s.postinst", package);
     if (!stat(postinst, &info)) {
 
-      (void)system("/bin/mount -o remount,rw /");
+      if (system("/bin/mount -o remount,rw /") != 0) {
+	fprintf(stderr, "Unable to remount / read-write\n");
+      }
 
       snprintf(command, MAXLINLEN,
 	       "OPKG_OFFLINE_ROOT=/media/cryptofs/apps /bin/sh %s 2>&1", postinst);
@@ -1786,7 +1909,7 @@ bool do_install(LSMessage *message, char *filename, char *pkg, char *url, bool u
   return false;
 }
 
-bool do_remove(LSMessage *message, char *package, bool replace, bool *removed) {
+bool do_remove(LSMessage *message, const char *package, bool replace, bool *removed) {
   LSError lserror;
   LSErrorInit(&lserror);
 
@@ -1797,12 +1920,15 @@ bool do_remove(LSMessage *message, char *package, bool replace, bool *removed) {
   struct stat info;
 
   // Check for an opkg prerm script
-  char prerm[MAXLINLEN];
+  // Room for the longest script path around a MAXNAMLEN sized package name.
+  char prerm[MAXNAMLEN+128];
   sprintf(prerm, "/media/cryptofs/apps/var/lib/opkg/info/%s.prerm", package);
 
   if (!stat(prerm, &info)) {
 
-    (void)system("/bin/mount -o remount,rw /");
+    if (system("/bin/mount -o remount,rw /") != 0) {
+      fprintf(stderr, "Unable to remount / read-write\n");
+    }
 
     snprintf(command, MAXLINLEN,
 	     "OPKG_OFFLINE_ROOT=/media/cryptofs/apps /bin/sh %s 2>&1", prerm);
@@ -2430,7 +2556,7 @@ bool impersonate_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   char uri[MAXLINLEN];
   sprintf(uri, "luna://%s/%s", json_object_get_string(service), json_object_get_string(method));
 
-  char *paramstring = NULL;
+  const char *paramstring = NULL;
   paramstring = json_object_to_json_string(params);
   if (!LSCallFromApplication(serviceHandle, uri, paramstring, json_object_get_string(id),
 			     impersonate_handler, message, NULL, &lserror)) goto error;
