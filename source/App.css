@@ -45,6 +45,11 @@
     background-color: #1d3f63;
 }
 
+/* blue buttons (OK, Launch) in the blue of the selected list item */
+.onyx-button.onyx-blue {
+    background-color: #1d3f63;
+}
+
 .list-item.onyx-selected {
     background-color: MidnightBlue;
 }

@@ -18,7 +18,7 @@ enyo.kind({
 		{tag: "hr"},
 		{name: "dialogContent"},
 		{components: [
-			{kind: "onyx.Button", style: "margin-top: 10px; margin-left: 5%; width: 90%", classes: "onyx-affirmative", content: $L("OK"), ontap: "chooseOk"},
+			{kind: "onyx.Button", style: "margin-top: 10px; margin-left: 5%; width: 90%", classes: "onyx-blue", content: $L("OK"), ontap: "chooseOk"},
 		]}
 	],
 	

@@ -13,6 +13,8 @@ enyo.kind({
 		title: "",
 		body: "",
 		okLabel: $L("Ok"),
+		//classes of the ok button, e.g. "onyx-affirmative" for a green one
+		okClasses: "onyx-blue",
 		cancelLabel: $L("Cancel")
 	},
 	bindings: [
@@ -32,11 +34,16 @@ enyo.kind({
 		{tag: "hr"},
 		{name: "dialogBody", allowHtml: true},
 		{components: [
-			{name: "okButton", kind: "onyx.Button", style: "margin-top: 10px; margin-right: 5%; width: 45%", classes: "onyx-blue", ontap: "chooseYes"},
+			{name: "okButton", kind: "onyx.Button", style: "margin-top: 10px; margin-right: 5%; width: 45%", ontap: "chooseYes"},
 			{name: "cancelButton", kind: "onyx.Button", style: "margin-top: 10px; margin-left: 5%; width: 45%", ontap: "chooseNo"}
 		]}
 	],
 	
+	create: function() {
+		this.inherited(arguments);
+		this.$.okButton.addClass(this.okClasses);
+	},
+
 	show: function(data) {
 		this.returnData = data;
 		

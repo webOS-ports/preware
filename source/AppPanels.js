@@ -30,6 +30,8 @@ enyo.kind({
             onReloadPackages: "reloadPackages",
             onListInstalledChanged: "listInstalledChanged",
             onPackageRefresh: "handlePackageRefresh",
+            onUpdateAllPackage: "showUpdateAllPackage",
+            onMultiInstallFinished: "updateAllButtonState",
             ondeviceready: "handleDeviceReady"
         },
 
@@ -169,7 +171,10 @@ enyo.kind({
                                 ]}
                             ]
                         },
-                        {kind: "GrabberToolbar"}
+                        {kind: "GrabberToolbar", components: [
+                            //Package Updates list only
+                            {name: "UpdateAllButton", kind: "onyx.Button", classes: "onyx-affirmative", showing: false, content: $L("Update All"), ontap: "updateAllTapped"}
+                        ]}
                     ]
                 },
                 //search results: in this column, so the menu stays visible next to them.
@@ -320,6 +325,31 @@ enyo.kind({
             this.$.PackageRepeater.setCount(count);
             this.$.NoPackages.setShowing(count === 0);
         }
+        this.updateAllButtonState();
+    },
+    //Update All: under the Package Updates list, while it has any.
+    updateAllButtonState: function () {
+        var menu = this.$.packagesMenu;
+        this.$.UpdateAllButton.setShowing(menu.currentPackageFilter === menu.packageFilters.updatable &&
+            menu.availablePackages.length > 0);
+        this.$.UpdateAllButton.setDisabled(!!preware.PackagesModel.multiPkgs);
+    },
+    updateAllTapped: function () {
+        if (preware.PackagesModel.startUpdateAll(this.$.packagesMenu.availablePackages.slice())) {
+            this.$.UpdateAllButton.setDisabled(true);
+        }
+    },
+    //the package Update All is on: its details show its progress.
+    showUpdateAllPackage: function (inSender, inEvent) {
+        if (this.$.packageDisplay.currentPackage === inEvent.pkg) {
+            this.$.packageDisplay.refreshPackageDisplay();
+        } else {
+            this.$.packageDisplay.setCurrentPackage(inEvent.pkg);
+        }
+        this.$.PackageDisplayPanels.setIndex(1);
+        if (!this.isSearching() && this.getIndex() === this.packagePanelsIndex) {
+            this.setIndex(this.packageDisplayPanelsIndex);
+        }
     },
     //the sort order preference changed: sort the list shown again.
     listSortChanged: function (inSender, inEvent) {
@@ -360,6 +390,7 @@ enyo.kind({
             this.$.PackagePanels.setIndex(1);
             this.setIndex(this.packagePanelsIndex);
         }
+        this.updateAllButtonState();
     },
 
     //Action Functions

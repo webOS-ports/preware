@@ -1018,7 +1018,7 @@ enyo.kind({
 
                     // do finishing stuff
                     if (multi !== undefined) {
-                        preware.PackagesModel.doMultiInstall(multi + 1);
+                        preware.PackagesModel.multiStepDone(multi);
                         return;
                     } else {
                         if (this.hasFlags('install')) {
@@ -1039,9 +1039,10 @@ enyo.kind({
                     // message
                     msg = this.type + $L(" installed");
                     msgError = true;
+                    enyo.Signals.send("onPackageRefresh");
 
                     if (multi !== undefined) {
-                        preware.PackagesModel.doMultiInstall(multi + 1);
+                        preware.PackagesModel.multiStepDone(multi);
                         return;
                     }
                 } else {
@@ -1049,6 +1050,10 @@ enyo.kind({
                 }
             }
 
+            if (multi !== undefined) {
+                preware.PackagesModel.multiStepDone(multi, msg);
+                return;
+            }
             if (msgError) {
                 console.error("assistant.actionMessage not yet replaced, logging instead");
                 enyo.log(
@@ -1094,7 +1099,7 @@ enyo.kind({
 
                     // do finishing stuff
                     if (multi !== undefined) {
-                        preware.PackagesModel.doMultiInstall(multi + 1);
+                        preware.PackagesModel.multiStepDone(multi);
                         return;
                     } else {
                         if (this.hasFlags('update')) {
@@ -1116,9 +1121,10 @@ enyo.kind({
                     // message
                     msg = this.type + $L(" updated");
                     msgError = true;
+                    enyo.Signals.send("onPackageRefresh");
 
                     if (multi !== undefined) {
-                        preware.PackagesModel.doMultiInstall(multi + 1);
+                        preware.PackagesModel.multiStepDone(multi);
                         return;
                     }
                 } else {
@@ -1126,6 +1132,10 @@ enyo.kind({
                 }
             }
 
+            if (multi !== undefined) {
+                preware.PackagesModel.multiStepDone(multi, msg);
+                return;
+            }
             if (msgError) {
                 console.error("assistant.actionMessage not yet replaced, logging instead");
                 enyo.log(

@@ -57,7 +57,7 @@ enyo.kind({
         {name: "LunaManagerDialog", kind: "LunaManagerDialog"},
         {name: "InstallPackageDialog", kind: "InstallPackageDialog", onHide: "installDialogHidden"},
         {name: "RestartDialog", kind: "Preware.ChoiceDialog", title: $L("Restart Required"), onAction: "restartAccepted", onDismiss: "restartDeclined"},
-        {name: "UpdateFeedsDialog", kind: "Preware.ChoiceDialog", title: $L("Update Feeds"), okLabel: $L("Update"), cancelLabel: $L("Not Now"),
+        {name: "UpdateFeedsDialog", kind: "Preware.ChoiceDialog", title: $L("Update Feeds"), okLabel: $L("Update"), okClasses: "onyx-affirmative", cancelLabel: $L("Not Now"),
             body: $L("Check the feeds for new and updated packages now?"), onAction: "updateFeedsYes", onDismiss: "updateFeedsNo"},
                 {name: "ResourceHandlerDialog", kind: "Preware.ChoiceDialog", title: $L("FileType Association"), onAction: "resourceHandlerAccepted", onDismiss: "resourceHandlerDeclined"},
         {

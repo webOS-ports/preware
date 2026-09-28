@@ -7,7 +7,10 @@ enyo.singleton({
     // for storing action information when we're in a multi-action
     multiPkg: false,
     multiPkgs: false,
+    multiUpdateAll: false,
     doMyApps: false,
+    //updated last by Update All, in this order (see startUpdateAll).
+    updateLastIds: ["org.webosinternals.preware", "com.palm.app.preware2"],
 
     // stores if packages are loaded or not
     loaded: false,
@@ -681,13 +684,78 @@ enyo.singleton({
         return;
     },
 
+    //Update All (the Package Updates list): updates the packages one after the
+    //other, each after the dependencies it needs. The package service goes last:
+    //the update of a package that brings it (the original Preware, Preware 2 on
+    //legacy webOS) restarts it, and Preware 2's own update can close the app.
+    //The user hears about it once, at the end.
+    startUpdateAll: function (pkgs) {
+        var list = [], last = [], i, j,
+            add = function (num) {
+                if (list.indexOf(num) === -1) {
+                    list.push(num);
+                }
+            },
+            addWithDeps = function (pkg) {
+                pkg.getDependenciesRecursive(true).forEach(add);
+                add(this.packagesReversed[pkg.pkg] - 1);
+            }.bind(this);
+        if (this.multiPkgs) {
+            return false; //one is running already
+        }
+        for (i = 0; i < pkgs.length; i += 1) {
+            j = this.updateLastIds.indexOf(pkgs[i].pkg);
+            if (j !== -1) {
+                last[j] = pkgs[i];
+            } else if (!pkgs[i].appCatalog || preware.PrefCookie.get().useTuckerbox) {
+                addWithDeps(pkgs[i]);
+            }
+        }
+        for (j = 0; j < last.length; j += 1) {
+            if (last[j]) {
+                addWithDeps(last[j]);
+            }
+        }
+        if (list.length === 0) {
+            return false;
+        }
+        this.multiPkg = false;
+        this.multiPkgs = list;
+        this.multiFlags = this.getMultiFlags();
+        this.multiUpdateAll = true;
+        this.doMultiInstall(0);
+        return true;
+    },
+    //a package of a multi install is done: note a failure (the rest still goes on) and do the next.
+    multiStepDone: function (number, errorMsg) {
+        var pkg;
+        if (!this.multiPkgs || number !== this.multiCurrent) {
+            return; //a second answer for a package already done
+        }
+        pkg = this.packages[this.multiPkgs[number]];
+        if (errorMsg) {
+            this.multiFailed.push("<b>" + enyo.dom.escape(pkg.title || pkg.pkg) + "</b>: " + errorMsg);
+        } else {
+            this.multiDone += 1;
+        }
+        this.doMultiInstall(number + 1);
+    },
+
     doMultiInstall: function (number) {
-        var pkg = this.packages[this.multiPkgs[number]], request;
+        var pkg = this.packages[this.multiPkgs[number]], request, msg;
         try {
+            if (number === 0) {
+                this.multiDone = 0;
+                this.multiFailed = [];
+            }
+            this.multiCurrent = number;
             // call install for dependencies
             if (number < this.multiPkgs.length) {
+                if (this.multiUpdateAll) {
+                    enyo.Signals.send("onUpdateAllPackage", {pkg: pkg});
+                }
                 //package is from appCatalog (?)
-                if (pkg.appCatalog && preware.PrefCookie.get().useTuckerbox) {
+                if (pkg.appCatalog && !preware.PrefCookie.get().useTuckerbox) {
                     this.doMyApps = true;
                     this.doMultiInstall(number + 1);
                 } else if (pkg.isInstalled) {
@@ -734,26 +802,31 @@ enyo.singleton({
                     }
                 }
 
-                if (this.multiFlags.RestartLuna || this.multiFlags.RestartJava || this.multiFlags.RestartDevice) {
-                    this.doSimpleMessage($L("Packages installed"));
+                if (this.multiUpdateAll) {
+                    msg = this.multiDone === 1 ? $L("1 package updated") : this.multiDone + $L(" packages updated");
+                } else {
+                    msg = $L("Packages installed");
+                }
+                if (this.multiFailed.length > 0) {
+                    msg += "<br /><br />" + $L("Failed:") + "<br />" + this.multiFailed.join("<br />");
+                }
+                this.doSimpleMessage(msg);
+                //no restart for nothing: only when something got installed
+                if (this.multiDone > 0 && (this.multiFlags.RestartLuna || this.multiFlags.RestartJava || this.multiFlags.RestartDevice)) {
                     enyo.Signals.send("onPackageActionRequired", {
-                        message: $L("Packages installed:<br /><br />") + this.multiActionMessage(this.multiFlags),
+                        message: msg + "<br /><br />" + this.multiActionMessage(this.multiFlags),
                         callback: this.multiActionFunction.bind(this, this.multiFlags)
                     });
-                    this.multiPkg    = false;
-                    this.multiPkgs    = false;
-                    this.multiFlags    = false;
-                    this.doMyApps        = false;
-                    return;
                 } else {
                     // we run this anyways to get the rescan
-                    this.multiRunFlags(this.multiFlags);
+                    this.multiRunFlags(this.multiDone > 0 ? this.multiFlags : {});
                 }
-                this.doSimpleMessage($L("Packages installed"));
                 this.multiPkg    = false;
                 this.multiPkgs    = false;
                 this.multiFlags    = false;
                 this.doMyApps        = false;
+                this.multiUpdateAll = false;
+                enyo.Signals.send("onMultiInstallFinished", {});
             }
         } catch (e) {
             console.error('error in packagesModel#doMultiInstall: ' + e);

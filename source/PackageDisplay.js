@@ -129,15 +129,21 @@ enyo.kind({
         {
             name: "SimpleMessage",
             kind: "Toast",
-            style: "height: 90px;",
+            //as tall as the message: an install error can be several lines
+            style: "height: auto;",
+            //its own layer, like the scroller in it: the TouchPad's WebKit does not
+            //draw a scrolling layer inside a moving one that is not.
+            accelerated: true,
             components: [
-                {
-                    name: "SimpleMessageContent",
-                    style: "display: block; font-size: 14pt; height: 32px;",
-                    allowHtml: true,
-                    content: "Message<br>I am a fish."
-                },
-                {kind: "onyx.Button", style: "display: block; width: 100%; margin-top: 4px;", content: "OK", ontap: "hideSimpleMessage"}
+                {name: "SimpleMessageScroller", kind: "enyo.Scroller", horizontal: "hidden", touch: true, maxHeight: "220px", components: [
+                    {
+                        name: "SimpleMessageContent",
+                        style: "display: block; font-size: 14pt; white-space: normal; word-wrap: break-word;",
+                        allowHtml: true,
+                        content: "Message<br>I am a fish."
+                    }
+                ]},
+                {kind: "onyx.Button", classes: "onyx-blue", style: "display: block; width: 100%; margin-top: 4px;", content: "OK", ontap: "hideSimpleMessage"}
             ]
         },
         {
@@ -172,19 +178,27 @@ enyo.kind({
             kind: "GrabberToolbar",
             //style: "position: absolute; bottom: 0; width: 100%;",
             style: "position: relative;",
+            //no grabber here: it covered the first button. The list is next to the
+            //details, or the back gesture goes back.
+            showGrabber: false,
             components: [
-                {name: "InstallButton", kind: "onyx.Button", showing: false, content: "Install", ontap: "installTapped"},
-                {name: "UpdateButton", kind: "onyx.Button", showing: false, content: "Update", ontap: "updateTapped"},
+                {name: "InstallButton", kind: "onyx.Button", classes: "onyx-affirmative", showing: false, content: "Install", ontap: "installTapped"},
+                {name: "UpdateButton", kind: "onyx.Button", classes: "onyx-affirmative", showing: false, content: "Update", ontap: "updateTapped"},
                 {name: "RemoveButton", kind: "onyx.Button", showing: false, content: "Remove", ontap: "removeTapped"},
-                {name: "LaunchButton", kind: "onyx.Button", showing: false, content: "Launch", ontap: "launchTapped"},
-                {name: "UnsaveButton", kind: "onyx.Button", showing: false, content: $L("Remove from Saved"), ontap: "unsaveTapped"}
+                {name: "LaunchButton", kind: "onyx.Button", classes: "onyx-blue", showing: false, content: "Launch", ontap: "launchTapped"}
             ]
-        }
+        },
+        //Remove of an installed package that is also in the Saved Package List.
+        //Tapping outside cancels.
+        {name: "RemoveChoiceDialog", kind: "Preware.ChoiceDialog", autoDismiss: true, title: $L("Remove from Saved or Uninstall?"),
+            okLabel: $L("Saved Only"), cancelLabel: $L("Uninstall"), onAction: "removeFromSavedChosen", onDismiss: "uninstallChosen"}
     ],
 
 
     //handlers:
     iconError: function (inSender) {
+        //remembered: setting the same src again does not fire another error
+        this.failedIcon = inSender.getSrc();
         inSender.hide();
         return true;
     },
@@ -197,11 +211,26 @@ enyo.kind({
     updateTapped: function () {
         this.currentPackage.doUpdate();
     },
+    //Remove uninstalls, or takes the package off the Saved Package List when it is
+    //only there. When it is both, ask which.
     removeTapped: function () {
-        this.currentPackage.doRemove();
+        if (!this.currentPackage.isInstalled) {
+            this.currentPackage.unsave();
+        } else if (this.currentPackage.isInSavedList) {
+            this.$.RemoveChoiceDialog.set("body", enyo.dom.escape(this.currentPackage.title) + " " +
+                $L("is also in the Saved Package List."));
+            this.$.RemoveChoiceDialog.show();
+        } else {
+            this.currentPackage.doRemove();
+        }
     },
-    unsaveTapped: function () {
+    removeFromSavedChosen: function () {
+        this.$.RemoveChoiceDialog.hide();
         this.currentPackage.unsave();
+    },
+    uninstallChosen: function () {
+        this.$.RemoveChoiceDialog.hide();
+        this.currentPackage.doRemove();
     },
     
     /** Opens every maintainer URL found. Realistically, will there ever be more than one? */
@@ -239,6 +268,7 @@ enyo.kind({
         this.hideActionMessage();
 
         this.$.SimpleMessageContent.setContent(inMessage);
+        this.$.SimpleMessageScroller.setScrollTop(0);
         if (this.$.SimpleMessage.value !== this.$.SimpleMessage.min) {
             this.$.SimpleMessage.animateToMin();
         }
@@ -302,7 +332,7 @@ enyo.kind({
     refreshPackageDisplay: function () {
 		this.$.PackageTitle.setContent(this.currentPackage.title);
         this.$.PackageIcon.setSrc(this.currentPackage.icon || "");
-        this.$.PackageIcon.setShowing(!!this.currentPackage.icon);
+        this.$.PackageIcon.setShowing(!!this.currentPackage.icon && this.currentPackage.icon !== this.failedIcon);
         this.$.PackageDescription.setContent(this.currentPackage.description);
         this.$.PackageHomepage.setContent(this.currentPackage.homepage);
         
@@ -374,15 +404,14 @@ enyo.kind({
     	}else{
     		this.$.InstallButton.show();
     		this.$.UpdateButton.hide();
-    		this.$.RemoveButton.hide();
+    		//a saved package that is not installed: Remove takes it off the list
+    		this.$.RemoveButton.setShowing(!!this.currentPackage.isInSavedList);
 			this.$.LaunchButton.hide();
     	}
     	
     	if(this.currentPackage.hasUpdate){
     		this.$.UpdateButton.show();
     	}
-
-    	this.$.UnsaveButton.setShowing(!!this.currentPackage.isInSavedList);
     },
     
     humanFileSize: function(bytes, si) {

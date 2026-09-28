@@ -44,14 +44,14 @@ enyo.kind({
                 		{name: "ipkSummary", allowHtml: true, showing: false, style: "color: white; margin: 0 0 12px 10px; line-height: 22px;"},
                 		{ kind: "onyx.Button", content: $L("Browse"), style:"width: 100%;", classes: "onyx-dark", ontap: "browseFiles" },
                         {name: "getInfoButton", kind: "onyx.Button", content: $L("Get Info"), style:"width: 100%; margin-top: 5px;", classes: "onyx-dark", ontap: "getInfo", disabled: true },
-                        {name: "installButton", kind: "onyx.Button", content: $L("Install"), style:"width: 100%; margin-top: 5px;", classes: "onyx-dark", ontap: "install", disabled: true },
+                        {name: "installButton", kind: "onyx.Button", content: $L("Install"), style:"width: 100%; margin-top: 5px;", classes: "onyx-affirmative", ontap: "install", disabled: true },
                         {tag: "div", style:"margin-top: 10px; color: white; background-color: #444; border-color: #aaaaaa; border-style: solid; border-width: 1px 1px 1px 1px; padding: 10px; border-radius: 8px;", components:[
                         	{tag: "div", style:"font-weight: bold;", content:$L("Note:")},
                         	{tag: "div", content:$L("If this package needs a luna restart or device restart after installation, you will need to manually perform it when the installation is complete.")},
                         ]},
                         {tag: "div", fit: true},
                         {tag: "div", style:"width: 100%; text-align: center", components: [
-        					{kind: "onyx.Button", classes: "onyx-affirmative", style: "margin:5px; width: 18%; min-width: 100px; font-size: 18px;", content: $L("Close"), ontap: "closePopup"}
+        					{kind: "onyx.Button", classes: "onyx-dark", style: "margin:5px; width: 18%; min-width: 100px; font-size: 18px;", content: $L("Close"), ontap: "closePopup"}
         				]},
                     ]
                 }, //end of selectPanel.
@@ -151,7 +151,7 @@ enyo.kind({
                         },
                         {tag: "div", style:"width: 100%; text-align: center", components: [
         					{name: "infoBackButton", kind: "onyx.Button", classes: "onyx-dark", style: "margin:5px; width: 18%; min-width: 100px; font-size: 18px;", content: $L("Back"), ontap: "backFromSpinner"},
-        					{name: "infoInstallButton", kind: "onyx.Button", classes: "onyx-dark", style: "margin:5px; width: 18%; min-width: 100px; font-size: 18px;", content: $L("Install"), ontap: "install"}
+        					{name: "infoInstallButton", kind: "onyx.Button", classes: "onyx-affirmative", style: "margin:5px; width: 18%; min-width: 100px; font-size: 18px;", content: $L("Install"), ontap: "install"}
         				]}
                     ]
                 },
