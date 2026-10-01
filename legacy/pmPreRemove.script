@@ -16,8 +16,8 @@ APPS=/media/cryptofs/apps
 
 [ -d $APPS ] || { echo "Requires webOS 1.3.5 or later" ; exit 1 ; }
 
-# Remove the boot-time service check of Preware 2
-rm -f /var/palm/event.d/preware2-service-check
+# Remove the service jobs of Preware 2
+rm -f /var/palm/event.d/preware2-service-check /var/palm/event.d/preware2-service-guard
 
 if [ ! -f ${APPS}/usr/palm/applications/org.webosinternals.preware/appinfo.json -a \
      ! -f ${APPS}/usr/palm/applications/org.webosinternals.preware-alpha/appinfo.json ] ; then

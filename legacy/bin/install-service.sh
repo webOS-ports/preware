@@ -54,6 +54,13 @@ if [ "$SERVICE_OK" -eq 0 ] ; then
   # Start the service
   /sbin/start ${SID}
 
+elif ! grep -q '^Type=static' /var/palm/system-services/${SID}.service ; then
+
+  # The original Preware's D-Bus service file lets the hub start a second instance
+  # of the service (see service-guard.sh). Replacing it needs no restart.
+  cp $APPDIR/dbus/${SID}.service /var/palm/system-services/${SID}.service
+  /usr/bin/ls-control scan-services || true
+
 fi
 
 exit 0

@@ -35,11 +35,14 @@ esac
 #
 sh $APPDIR/bin/install-service.sh
 
-# Check the service at every boot. Install the job atomically: upstart re-reads jobs in
-# /var/palm/event.d as soon as they change, so write it elsewhere and rename it.
+# Check the service at every boot, and keep it to one instance whenever it starts
+# (bin/service-guard.sh). Install the jobs atomically: upstart re-reads jobs in
+# /var/palm/event.d as soon as they change, so write them elsewhere and rename them.
 mkdir -p /var/palm/event.d
-cp $APPDIR/upstart/preware2-service-check /var/palm/.preware2-service-check.new
-mv /var/palm/.preware2-service-check.new /var/palm/event.d/preware2-service-check
+for JOB in preware2-service-check preware2-service-guard ; do
+  cp $APPDIR/upstart/$JOB /var/palm/.$JOB.new
+  mv /var/palm/.$JOB.new /var/palm/event.d/$JOB
+done
 
 #
 # Feeds (same defaults as the original Preware)

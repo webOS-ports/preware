@@ -1,0 +1,8 @@
+description "Preware 2: keep the package manager service to one instance"
+
+start on started org.webosinternals.ipkgservice
+
+script
+   S=/media/cryptofs/apps/usr/palm/applications/@APPID@/bin/service-guard.sh
+   [ -f $S ] && sh $S
+end script
