@@ -102,7 +102,14 @@
 		shouldDrag: enyo.inherit(function (sup) {
 			return function(inEvent) {
 				// stop and update drag info before checking drag status
+				var coasting = this.isScrolling();
 				this.stop();
+				if (coasting) {
+					// A coasting scroll only moves the translate; stop() does not
+					// emit scrollStop, so move it into scrollTop/scrollLeft here or
+					// the drag starts from where the coast began and snaps back.
+					this.effectScrollStop();
+				}
 				this.calcStartInfo();
 				return sup.apply(this, arguments);
 			};
