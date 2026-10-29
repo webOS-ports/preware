@@ -20,7 +20,8 @@ pkg_check_modules(MJSON REQUIRED json-c)
 include_directories(${MJSON_INCLUDE_DIRS})
 webos_add_compiler_flags(ALL ${MJSON_CFLAGS})
 
-# ipk_check.c reads the packages' gzip'd control and data archives itself.
+# ipk_check.c reads the packages' gzip'd control and data archives itself,
+# fetch.c unpacks the gzip'd feed indexes.
 pkg_check_modules(ZLIB REQUIRED zlib)
 include_directories(${ZLIB_INCLUDE_DIRS})
 webos_add_compiler_flags(ALL ${ZLIB_CFLAGS})
@@ -46,6 +47,10 @@ if(BUILD_TESTS)
     target_include_directories(test_ipk_check PRIVATE src)
     target_link_libraries(test_ipk_check ${ZLIB_LDFLAGS})
     add_test(NAME ipk-check COMMAND test_ipk_check)
+    add_executable(test_fetch tests/test_fetch.c src/fetch.c)
+    target_include_directories(test_fetch PRIVATE src)
+    target_link_libraries(test_fetch ${ZLIB_LDFLAGS} pthread)
+    add_test(NAME fetch COMMAND test_fetch)
 endif()
 
 webos_build_daemon()

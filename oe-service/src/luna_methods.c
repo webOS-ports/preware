@@ -16,6 +16,9 @@
  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  =============================================================================*/
 
+// pipe2(), for the pipes spawn_reader() opens while other threads spawn too.
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,12 +31,14 @@
 #include <sys/select.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <spawn.h>
 
 #include <json.h>
 
 #include "luna_service.h"
 #include "luna_methods.h"
 #include "ipk_check.h"
+#include "fetch.h"
 
 #define ALLOWED_CHARS "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-+_"
 
@@ -385,8 +390,72 @@ static bool appinstaller(char *message) {
 // If locked is set, replies are serialised against the other threads.
 // The return value says whether the command executed successfully or not.
 //
+static bool run_process_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
+			  const char *command, char *const argv[],
+			  LSMessage *message, subscribefun subscriber);
+
 static bool run_command_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
-			  char *command, LSMessage *message, subscribefun subscriber) {
+			  const char *command, LSMessage *message, subscribefun subscriber) {
+  return run_process_r(outbuf, escbuf, msgbuf, locked, command, NULL, message, subscriber);
+}
+
+//
+// Start argv[0] with argv, without a shell, its stdout and stderr on the
+// returned stream and stdin on /dev/null.  The pid goes to *pid.
+//
+static FILE *spawn_reader(char *const argv[], pid_t *pid) {
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC)) return NULL;
+
+  posix_spawn_file_actions_t fa;
+  if (posix_spawn_file_actions_init(&fa)) {
+    close(fds[0]); close(fds[1]);
+    return NULL;
+  }
+  int rc = posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+  if (!rc) rc = posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
+  if (!rc) rc = posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
+  extern char **environ;
+  if (!rc) rc = posix_spawn(pid, argv[0], &fa, NULL, argv, environ);
+  posix_spawn_file_actions_destroy(&fa);
+  close(fds[1]);
+  if (rc) {
+    close(fds[0]);
+    return NULL;
+  }
+  FILE *fp = fdopen(fds[0], "r");
+  if (!fp) {
+    close(fds[0]);
+    (void)waitpid(*pid, NULL, 0);
+  }
+  return fp;
+}
+
+//
+// End a process from spawn_reader(): true if it exited with status 0.
+//
+static bool spawn_close(FILE *fp, pid_t pid) {
+  fclose(fp);
+  int status;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) return false;
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+//
+// Run argv without a shell, as run_command_r() runs a shell command.
+// display is what logs and error replies show for it.
+//
+static bool run_argv_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
+		       const char *display, char *const argv[],
+		       LSMessage *message, subscribefun subscriber) {
+  return run_process_r(outbuf, escbuf, msgbuf, locked, display, argv, message, subscriber);
+}
+
+static bool run_process_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
+			  const char *command, char *const argv[],
+			  LSMessage *message, subscribefun subscriber) {
   LSError lserror;
   LSErrorInit(&lserror);
 
@@ -409,7 +478,8 @@ static bool run_command_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
   fprintf(stderr, "Running command %s\n", command);
 
   // Start execution of the command, and read the output.
-  FILE *fp = popen(command, "r");
+  pid_t pid = 0;
+  FILE *fp = argv ? spawn_reader(argv, &pid) : popen(command, "r");
 
   // Return immediately if we cannot even start the command.
   if (!fp) {
@@ -419,16 +489,18 @@ static bool run_command_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
   // Initialise the previous line contents.
   strcpy(lastline, "");
 
-  // Loop through the output lines
-  while (!feof(fp)) {
+  // Loop through the output lines (a read error ends them too)
+  while (!feof(fp) && !ferror(fp)) {
 
     // Initialise the current line contents.
     strcpy(line, "");
     int len = 0;
 
-    // Read and store characters up to the next LF or NL.
+    // Read and store characters up to the next LF or NL, leaving room for
+    // the terminating NUL: a longer line (curl prints the server's headers)
+    // is split.
     int c;
-    while ((len < MAXLINLEN) && ((c = fgetc(fp)) != EOF)) {
+    while ((len < MAXLINLEN - 1) && ((c = fgetc(fp)) != EOF)) {
       // Rewind the buffer for carriage returns without a linefeed.
       if (c == '\r') {
 	*lastpos = '\0';
@@ -518,12 +590,16 @@ static bool run_command_r(char *outbuf, char *escbuf, char *msgbuf, bool locked,
   }
 
   // Check the close status of the process, and return the combined error status
-  if (pclose(fp) || error) {
+  if (argv ? !spawn_close(fp, pid) : pclose(fp) != 0) {
+    return false;
+  }
+  if (error) {
     return false;
   }
 
   return true;
  error:
+  if (argv) (void)spawn_close(fp, pid); else (void)pclose(fp);
   LSErrorPrint(&lserror, stderr);
   LSErrorFree(&lserror);
   // %%% We need a way to distinguish command failures from LSMessage failures %%%
@@ -597,6 +673,85 @@ static bool report_command_failure_r(char *msgbuf, char *escbuf, bool locked,
 static bool report_command_failure(LSMessage *message, char *command, char *stdErrText, char *additional) {
   return report_command_failure_r(buffer, esc_buffer, false,
 				  message, command, stdErrText, additional);
+}
+
+//
+// Refuse a download: reply with why and stage "failed".  Returns the
+// LSMessageRespond result.
+//
+static bool refuse_fetch(LSMessage *message, bool locked, const char *why) {
+  LSError lserror;
+  LSErrorInit(&lserror);
+  char reply[512];
+  // why is one of our own messages, without characters JSON would escape.
+  snprintf(reply, sizeof(reply),
+	   "{\"returnValue\": false, \"errorCode\": -1, \"errorText\": \"%s\", \"stage\": \"failed\"}",
+	   why);
+  fprintf(stderr, "%s\n", why);
+  bool ok = locked ? locked_respond(message, reply, &lserror) : LSMessageRespond(message, reply, &lserror);
+  if (!ok) {
+    LSErrorPrint(&lserror, stderr);
+    LSErrorFree(&lserror);
+  }
+  return ok;
+}
+
+//
+// Should the Device-Id and Auth-Token headers go to url?
+//
+static bool send_auth_to(const char *url) {
+  return !strncmp(url, "https://", 8);
+}
+
+typedef enum {
+  CURL_OK,        // done, and the stage reply sent
+  CURL_FAILED,    // curl failed, and the failure reported
+  CURL_LS_ERROR   // a reply could not be sent
+} curl_result;
+
+//
+// Run curl, without a shell, to check (FETCH_HEAD) or download
+// (FETCH_DOWNLOAD, into output) url, which fetch_url_allowed() passed.
+// Replies with stage "verify" or "download", or reports the failure, using
+// the given buffers; locked as for run_command_r().
+//
+static curl_result run_curl(char *outbuf, char *escbuf, char *msgbuf, bool locked, LSMessage *message,
+			    fetch_mode mode, const char *url, const char *output) {
+  LSError lserror;
+  LSErrorInit(&lserror);
+
+  bool https = false;
+  (void)fetch_url_parse(url, &https, NULL, 0);
+  bool auth = send_auth_to(url);
+
+  const char *argv[40];
+  fetch_headers hdr;
+  char display[MAXLINLEN];
+  if (!fetch_curl_argv(argv, sizeof(argv) / sizeof(argv[0]), &hdr, mode, url, output, https,
+		       auth, device, token)) {
+    return refuse_fetch(message, locked, "Refusing the download: invalid URL, file or credentials")
+      ? CURL_FAILED : CURL_LS_ERROR;
+  }
+  fetch_argv_display(argv, display, sizeof(display));
+
+  const char *stage = mode == FETCH_HEAD ? "verify" : "download";
+  strcpy(outbuf, "{\"stdOut\": [");
+  // posix_spawn() takes char *const[]; the strings are not changed.
+  if (run_argv_r(outbuf, escbuf, msgbuf, locked, display, (char *const *)argv, message,
+		 mode == FETCH_HEAD ? verifyheader : downloadstats)) {
+    size_t used = strlen(outbuf);
+    snprintf(outbuf + used, MAXBUFLEN - used, "], \"returnValue\": true, \"stage\": \"%s\"}", stage);
+    bool ok = locked ? locked_respond(message, outbuf, &lserror) : LSMessageRespond(message, outbuf, &lserror);
+    if (!ok) {
+      LSErrorPrint(&lserror, stderr);
+      LSErrorFree(&lserror);
+      return CURL_LS_ERROR;
+    }
+    return CURL_OK;
+  }
+  strcat(outbuf, "]");
+  return report_command_failure_r(msgbuf, escbuf, locked, message, display, outbuf + 11,
+				  "\"stage\": \"failed\"") ? CURL_FAILED : CURL_LS_ERROR;
 }
 
 //
@@ -1556,97 +1711,64 @@ bool delete_config_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
 // than the process-wide statics, and replies under the respond mutex.
 //
 bool do_download(LSMessage *message, bool gzipped, const char *feed, const char *url) {
-  LSError lserror;
-  LSErrorInit(&lserror);
-
   bool returnValue = false;
 
-  char command[MAXLINLEN];
+  // The feed name becomes a file name in the cache, the URL a curl argument.
+  if (!fetch_safe_name(feed)) {
+    (void)refuse_fetch(message, true, "Refusing an invalid feed name");
+    return false;
+  }
+  char why[256];
+  if (!fetch_url_allowed(url, FETCH_FEED_CONF_DIR, why, sizeof(why))) {
+    (void)refuse_fetch(message, true, why);
+    return false;
+  }
 
-  char pathname[MAXNAMLEN];
-  sprintf(pathname, "/media/cryptofs/apps/var/lib/opkg/cache/%s", feed);
+  char pathname[MAXNAMLEN + 64];
+  snprintf(pathname, sizeof(pathname), "/media/cryptofs/apps/var/lib/opkg/cache/%s", feed);
+  char packed[sizeof(pathname) + 16];
+  snprintf(packed, sizeof(packed), "%s.gz-download", pathname);
+  char index_url[MAXLINLEN + 16];
+  if (snprintf(index_url, sizeof(index_url), "%s/%s", url, gzipped ? "Packages.gz" : "Packages")
+      >= (int)sizeof(index_url)) {
+    (void)refuse_fetch(message, true, "Refusing an over-long feed URL");
+    return false;
+  }
 
-  // The download below writes into the cache through a shell redirect, which
-  // does not create it.
   prepare_directories();
-
-  char headers[MAXLINLEN];
 
   // Too big to sit on the thread stack, and needed for the whole call.
   command_buffers *bufs = malloc(sizeof(command_buffers));
   if (!bufs) {
-    (void)locked_respond(message,
-			 "{\"returnValue\": false, \"errorCode\": -1, "
-			 "\"errorText\": \"Out of memory\", \"stage\": \"failed\"}",
-			 &lserror);
+    (void)refuse_fetch(message, true, "Out of memory");
     return false;
-  }
-
-  if (!strncmp(url, "https://", 8)) {
-    snprintf(headers, MAXLINLEN,
-	     "--user-agent Preware -H \"Device-Id: %s\" -H \"Auth-Token: %s\"",
-	     device, token);
-  }
-  else {
-    strcpy(headers, "--user-agent Preware");
   }
 
   /* Verify access to the file */
 
-  if (gzipped) {
-    snprintf(command, MAXLINLEN,
-	     "/usr/bin/curl -s -I %s --location --fail --show-error %s/Packages.gz 2>&1",
-	     headers, url);
-  }
-  else {
-    snprintf(command, MAXLINLEN,
-	     "/usr/bin/curl -s -I %s --location --fail --show-error %s/Packages 2>&1",
-	     headers, url);
-  }
-
-  strcpy(bufs->out, "{\"stdOut\": [");
-  if (run_command_r(bufs->out, bufs->esc, bufs->msg, true, command, message, verifyheader)) {
-    strcat(bufs->out, "], \"returnValue\": true, \"stage\": \"verify\"}");
-    if (!locked_respond(message, bufs->out, &lserror)) goto error;
-  }
-  else {
-    strcat(bufs->out, "]");
-    (void)report_command_failure_r(bufs->msg, bufs->esc, true,
-				   message, command, bufs->out+11, "\"stage\": \"failed\"");
+  if (run_curl(bufs->out, bufs->esc, bufs->msg, true, message, FETCH_HEAD, index_url, NULL) != CURL_OK)
     goto end;
-  }
 
   /* Download the file */
 
-  if (gzipped) {
-    snprintf(command, MAXLINLEN,
-	     "( /usr/bin/curl %s --create-dirs --location --fail --show-error %s/Packages.gz | /bin/gunzip > %s ) 2>&1",
-	     headers, url, pathname);
-  }
-  else {
-    snprintf(command, MAXLINLEN,
-	     "/usr/bin/curl %s --create-dirs --location --fail --show-error --output %s %s/Packages 2>&1",
-	     headers, pathname, url);
-  }
-
-  strcpy(bufs->out, "{\"stdOut\": [");
-  if (run_command_r(bufs->out, bufs->esc, bufs->msg, true, command, message, downloadstats)) {
-    strcat(bufs->out, "], \"returnValue\": true, \"stage\": \"download\"}");
-    if (!locked_respond(message, bufs->out, &lserror)) goto error;
-  }
-  else {
-    strcat(bufs->out, "]");
-    (void)report_command_failure_r(bufs->msg, bufs->esc, true,
-				   message, command, bufs->out+11, "\"stage\": \"failed\"");
+  if (run_curl(bufs->out, bufs->esc, bufs->msg, true, message, FETCH_DOWNLOAD, index_url,
+	       gzipped ? packed : pathname) != CURL_OK) {
+    if (gzipped) unlink(packed);
     goto end;
   }
 
-  returnValue = true;
-  goto end;
+  if (gzipped) {
+    char gzerr[128];
+    bool unpacked = fetch_gunzip(packed, pathname, gzerr, sizeof(gzerr));
+    unlink(packed);
+    if (!unpacked) {
+      (void)refuse_fetch(message, true, gzerr);
+      goto end;
+    }
+  }
 
- error:
-  LSErrorPrint(&lserror, stderr);
-  LSErrorFree(&lserror);
+  returnValue = true;
+
  end:
   free(bufs);
   return returnValue;
@@ -1885,7 +2007,8 @@ static bool install_staged(LSMessage *message, const char *pathname, const char 
 bool do_install(LSMessage *message, const char *filename, const char *pkg, const char *url, bool useSvc) {
   bool result = do_install_package(message, filename, pkg, url, useSvc);
 
-  if (strncmp(url, "file:///media/internal/.developer/", 34)) {
+  // filename is only a file name of ours when it passed fetch_safe_name().
+  if (fetch_safe_name(filename) && strncmp(url, "file:///media/internal/.developer/", 34)) {
     char pathname[MAXNAMLEN];
     snprintf(pathname, sizeof(pathname), "/media/internal/.developer/%s", filename);
     unlink(pathname);
@@ -1904,60 +2027,38 @@ static bool do_install_package(LSMessage *message, const char *filename, const c
   LSError lserror;
   LSErrorInit(&lserror);
 
-  char command[MAXLINLEN];
+  char pathname[MAXNAMLEN + 64];
 
-  char pathname[MAXNAMLEN];
-  sprintf(pathname, "/media/internal/.developer/%s", filename);
-
-  if (!strncmp(url, "file:///media/internal/.developer/", 34)) {
-    strcpy(pathname, url+7);
+  if (!strncmp(url, "file://", 7)) {
+    // Only a file directly in /media/internal/.developer.
+    if (!fetch_developer_path(url, pathname, sizeof(pathname))) {
+      if (!refuse_fetch(message, false, "Refusing a file URL outside /media/internal/.developer")) goto end;
+      return true;
+    }
   }
   else {
-
-    char headers[MAXLINLEN];
-
-    if (!strncmp(url, "https://", 8)) {
-      snprintf(headers, MAXLINLEN,
-	       "--user-agent Preware -H \"Device-Id: %s\" -H \"Auth-Token: %s\"",
-	       device, token);
+    char why[256];
+    if (!fetch_safe_name(filename)) {
+      if (!refuse_fetch(message, false, "Refusing an invalid package file name")) goto end;
+      return true;
     }
-    else {
-      strcpy(headers, "--user-agent Preware");
+    if (!fetch_url_allowed(url, FETCH_FEED_CONF_DIR, why, sizeof(why))) {
+      if (!refuse_fetch(message, false, why)) goto end;
+      return true;
     }
+    snprintf(pathname, sizeof(pathname), "%s%s", FETCH_DEVELOPER_DIR, filename);
 
-  /* Verify access to the file */
+    /* Verify access to the file */
 
-    snprintf(command, MAXLINLEN,
-	     "/usr/bin/curl -s -I %s --location --fail --show-error %s 2>&1",
-	     headers, url);
-
-  strcpy(run_command_buffer, "{\"stdOut\": [");
-  if (run_command(command, message, verifyheader)) {
-    strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"verify\"}");
-    if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-  }
-  else {
-    strcat(run_command_buffer, "]");
-    if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"failed\"")) goto end;
-    return false;
-  }
+    curl_result r = run_curl(run_command_buffer, esc_buffer, buffer, false, message, FETCH_HEAD, url, NULL);
+    if (r == CURL_LS_ERROR) goto end;
+    if (r == CURL_FAILED) return false;
 
     /* Download the package */
 
-    snprintf(command, MAXLINLEN,
-	     "/usr/bin/curl %s --create-dirs --location --fail --show-error --output %s %s 2>&1",
-	     headers, pathname, url);
-
-    strcpy(run_command_buffer, "{\"stdOut\": [");
-    if (run_command(command, message, downloadstats)) {
-      strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"download\"}");
-      if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-    }
-    else {
-      strcat(run_command_buffer, "]");
-      if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"failed\"")) goto end;
-      return true;
-    }
+    r = run_curl(run_command_buffer, esc_buffer, buffer, false, message, FETCH_DOWNLOAD, url, pathname);
+    if (r == CURL_LS_ERROR) goto end;
+    if (r == CURL_FAILED) return true;
   }
 
   /* Copy the package to where only root can change it */
@@ -2577,8 +2678,8 @@ bool extract_control_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
 			&lserror)) goto error;
     return true;
   }
-  char filename[MAXNAMLEN];
-  sprintf(filename, "/media/internal/.developer/%s", json_object_get_string(id));
+  char filename[MAXNAMLEN + 64];
+  const char *name = json_object_get_string(id);
 
   // Extract the url argument from the message
   id = json_object_object_get(object, "url");
@@ -2591,66 +2692,52 @@ bool extract_control_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
 			&lserror)) goto error;
     return true;
   }
-  char url[MAXLINLEN];
-  strcpy(url, json_object_get_string(id));
+  const char *url = json_object_get_string(id);
 
-  if (!strncmp(url, "file:///media/internal/.developer/", 34)) {
-    strcpy(filename, url+7);
-  }
-  else {
-
-    char headers[MAXLINLEN];
-
-    if (!strncmp(url, "https://", 8)) {
-      snprintf(headers, MAXLINLEN,
-	       "--user-agent Preware -H \"Device-Id: %s\" -H \"Auth-Token: %s\"",
-	       device, token);
-    }
-    else {
-      strcpy(headers, "--user-agent Preware");
-    }
-
-  /* Verify access to the file */
-
-    snprintf(command, MAXLINLEN,
-	     "/usr/bin/curl -s -I %s --location --fail --show-error %s 2>&1",
-	     headers, url);
-
-    strcpy(run_command_buffer, "{\"stdOut\": [");
-    if (run_command(command, message, verifyheader)) {
-      strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"verify\"}");
-      if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-    }
-    else {
-      strcat(run_command_buffer, "]");
-      if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"failed\"")) goto end;
-      return false;
-    }
-
-    /* Download the package */
-
-    snprintf(command, MAXLINLEN,
-	     "/usr/bin/curl %s --create-dirs --location --fail --show-error --output %s %s 2>&1",
-	     headers, filename, url);
-
-    strcpy(run_command_buffer, "{\"stdOut\": [");
-    if (run_command(command, message, downloadstats)) {
-      strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"download\"}");
-      if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-    }
-    else {
-      strcat(run_command_buffer, "]");
-      if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"failed\"")) goto end;
+  if (!strncmp(url, "file://", 7)) {
+    // Only a file directly in /media/internal/.developer.
+    if (!fetch_developer_path(url, filename, sizeof(filename))) {
+      if (!refuse_fetch(message, false, "Refusing a file URL outside /media/internal/.developer")) goto end;
       return true;
     }
   }
+  else {
+    char why[256];
+    if (!fetch_safe_name(name)) {
+      if (!refuse_fetch(message, false, "Refusing an invalid package file name")) goto end;
+      return true;
+    }
+    if (!fetch_url_allowed(url, FETCH_FEED_CONF_DIR, why, sizeof(why))) {
+      if (!refuse_fetch(message, false, why)) goto end;
+      return true;
+    }
+    snprintf(filename, sizeof(filename), "%s%s", FETCH_DEVELOPER_DIR, name);
+
+    /* Verify access to the file */
+
+    curl_result r = run_curl(run_command_buffer, esc_buffer, buffer, false, message, FETCH_HEAD, url, NULL);
+    if (r == CURL_LS_ERROR) goto end;
+    if (r == CURL_FAILED) return false;
+
+    /* Download the package */
+
+    r = run_curl(run_command_buffer, esc_buffer, buffer, false, message, FETCH_DOWNLOAD, url, filename);
+    if (r == CURL_LS_ERROR) goto end;
+    if (r == CURL_FAILED) return true;
+  }
 
   /* Extract the control file */
-  snprintf(command, MAXLINLEN,
-	   "/usr/bin/ar p %s control.tar.gz | /bin/tar -O -z -x --no-anchored -f - control 2>&1", filename);
+
+  // The file name goes to the shell as an argument, never into the script.
+  char *const argv[] = {
+    "/bin/sh", "-c",
+    "/usr/bin/ar p \"$1\" control.tar.gz | /bin/tar -O -z -x --no-anchored -f - control 2>&1",
+    "sh", filename, NULL
+  };
+  snprintf(command, MAXLINLEN, "/usr/bin/ar p %s control.tar.gz | /bin/tar -O -z -x --no-anchored -f - control", filename);
   // Initialise the output buffer
   strcpy(run_command_buffer, "{\"stdOut\": [");
-  if (run_command(command, NULL, NULL)) {
+  if (run_argv_r(run_command_buffer, esc_buffer, buffer, false, command, argv, NULL, NULL)) {
     sprintf(buffer, "{\"filename\":\"%s\", \"info\": ", filename);
     strcat(buffer, run_command_buffer+11);
     strcat(buffer, "], \"returnValue\": true, \"stage\": \"completed\"}");
