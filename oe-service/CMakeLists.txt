@@ -51,6 +51,13 @@ if(BUILD_TESTS)
     target_include_directories(test_fetch PRIVATE src)
     target_link_libraries(test_fetch ${ZLIB_LDFLAGS} pthread)
     add_test(NAME fetch COMMAND test_fetch)
+    # Includes luna_methods.c: the service's own process runner.
+    add_executable(test_run_argv tests/test_run_argv.c src/ipk_check.c src/fetch.c src/luna_service.c)
+    target_include_directories(test_run_argv PRIVATE src)
+    target_compile_options(test_run_argv PRIVATE -fcommon)
+    target_link_libraries(test_run_argv
+        ${GLIB2_LDFLAGS} ${LUNASERVICE2_LDFLAGS} ${MJSON_LDFLAGS} ${ZLIB_LDFLAGS} rt pthread)
+    add_test(NAME run-argv COMMAND test_run_argv)
 endif()
 
 webos_build_daemon()
