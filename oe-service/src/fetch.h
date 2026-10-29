@@ -65,6 +65,16 @@ bool fetch_url_allowed(const char *url, const char *confdir, char *err, size_t e
 // to path.
 bool fetch_developer_path(const char *url, char *path, size_t path_len);
 
+// The hosts of the official webOS-ports feeds: the only ones that get the
+// Device-Id and Auth-Token headers.
+#define FETCH_OFFICIAL_FEED_HOSTS { "feeds.webos-ports.org" }
+
+// Should the Device-Id and Auth-Token headers go to url?  Only for an
+// https:// URL whose host (after parsing, without port, case-insensitive)
+// is exactly one of FETCH_OFFICIAL_FEED_HOSTS; never for http or any other
+// feed.
+bool fetch_send_auth(const char *url);
+
 // A value fit for an HTTP header: 1..255 printable characters, no CR/LF.
 bool fetch_header_value_ok(const char *value);
 

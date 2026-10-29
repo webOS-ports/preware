@@ -229,6 +229,28 @@ static void test_header_values(void) {
   check("NULL refused", !fetch_header_value_ok(NULL));
 }
 
+// ------------------------------------------------------- credentials
+
+static void test_send_auth(void) {
+  check("official feed over https gets credentials",
+	fetch_send_auth("https://feeds.webos-ports.org/webos-ports/all/Packages.gz"));
+  check("host compared case-insensitively", fetch_send_auth("https://FEEDS.webos-ports.ORG/x"));
+  check("port does not matter", fetch_send_auth("https://feeds.webos-ports.org:443/x"));
+  check("official feed over http gets none", !fetch_send_auth("http://feeds.webos-ports.org/x"));
+  check("third-party https feed gets none", !fetch_send_auth("https://feed.pivotce.com/Packages"));
+  check("suffix look-alike gets none", !fetch_send_auth("https://feeds.webos-ports.org.evil.example/x"));
+  check("prefix look-alike gets none", !fetch_send_auth("https://evilfeeds.webos-ports.org/x"));
+  check("subdomain gets none", !fetch_send_auth("https://a.feeds.webos-ports.org/x"));
+  check("parent domain gets none", !fetch_send_auth("https://webos-ports.org/x"));
+  check("host in the path gets none", !fetch_send_auth("https://evil.example/feeds.webos-ports.org/x"));
+  check("host in the query gets none", !fetch_send_auth("https://evil.example/?h=feeds.webos-ports.org"));
+  check("userinfo trick gets none", !fetch_send_auth("https://feeds.webos-ports.org@evil.example/x"));
+  check("userinfo trick with port gets none", !fetch_send_auth("https://feeds.webos-ports.org:443@evil.example/x"));
+  check("trailing dot gets none", !fetch_send_auth("https://feeds.webos-ports.org./x"));
+  check("file URL gets none", !fetch_send_auth("file:///media/internal/.developer/x.ipk"));
+  check("NULL gets none", !fetch_send_auth(NULL));
+}
+
 // ------------------------------------------------------------ curl argv
 
 static size_t argc_of(const char **argv) {
@@ -392,6 +414,7 @@ int main(void) {
   test_http_configured();
   test_developer_path();
   test_header_values();
+  test_send_auth();
   test_curl_argv();
   test_gunzip();
   test_threads();

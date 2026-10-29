@@ -196,6 +196,16 @@ bool fetch_developer_path(const char *url, char *path, size_t path_len) {
   return n > 0 && (size_t)n < path_len;
 }
 
+bool fetch_send_auth(const char *url) {
+  static const char *const official[] = FETCH_OFFICIAL_FEED_HOSTS;
+  bool https = false;
+  char host[MAX_HOST + 1];
+  if (!fetch_url_parse(url, &https, host, sizeof(host)) || !https) return false;
+  for (size_t i = 0; i < sizeof(official) / sizeof(official[0]); i++)
+    if (!strcmp(host, official[i])) return true;
+  return false;
+}
+
 bool fetch_header_value_ok(const char *value) {
   if (!value) return false;
   size_t len = strlen(value);

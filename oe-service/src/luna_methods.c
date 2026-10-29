@@ -696,13 +696,6 @@ static bool refuse_fetch(LSMessage *message, bool locked, const char *why) {
   return ok;
 }
 
-//
-// Should the Device-Id and Auth-Token headers go to url?
-//
-static bool send_auth_to(const char *url) {
-  return !strncmp(url, "https://", 8);
-}
-
 typedef enum {
   CURL_OK,        // done, and the stage reply sent
   CURL_FAILED,    // curl failed, and the failure reported
@@ -722,7 +715,8 @@ static curl_result run_curl(char *outbuf, char *escbuf, char *msgbuf, bool locke
 
   bool https = false;
   (void)fetch_url_parse(url, &https, NULL, 0);
-  bool auth = send_auth_to(url);
+  // The device id and token only go to the webOS-ports feeds, over https.
+  bool auth = fetch_send_auth(url);
 
   const char *argv[40];
   fetch_headers hdr;
