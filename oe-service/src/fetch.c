@@ -233,6 +233,85 @@ bool fetch_send_auth(const char *url) {
   return false;
 }
 
+// The number of path components of root ("/a/b" is 2), or 0 if path does
+// not start with it on a component boundary.
+static size_t root_match(const char *path, const char *root) {
+  size_t rlen = strlen(root);
+  if (rlen < 2 || root[0] != '/' || strncmp(path, root, rlen)) return 0;
+  if (path[rlen] != '\0' && path[rlen] != '/') return 0;
+  size_t n = 0;
+  for (size_t i = 0; i < rlen; i++)
+    if (root[i] == '/') n++;
+  return n;
+}
+
+int fetch_open_listing_dir(const char *path, const char *const *roots, size_t nroots,
+			   char *err, size_t err_len) {
+  if (!path || path[0] != '/' || strlen(path) >= 4096 ||
+      strspn(path, NAME_CHARS "/") != strlen(path)) {
+    set_err(err, err_len, "Invalid directory");
+    return -1;
+  }
+
+  // Split into components; refuse empty (other than a trailing '/'), "."
+  // and "..".
+  char copy[4096];
+  snprintf(copy, sizeof(copy), "%s", path);
+  char *comp[512];
+  size_t ncomp = 0;
+  char *p = copy + 1;
+  while (*p) {
+    char *slash = strchr(p, '/');
+    if (slash == p) {  // "//"
+      set_err(err, err_len, "Invalid directory");
+      return -1;
+    }
+    if (slash) *slash = '\0';
+    if (!strcmp(p, ".") || !strcmp(p, "..") || ncomp == sizeof(comp) / sizeof(comp[0])) {
+      set_err(err, err_len, "Invalid directory");
+      return -1;
+    }
+    comp[ncomp++] = p;
+    if (!slash) break;
+    p = slash + 1;  // "" after a trailing '/' ends the loop
+  }
+
+  // Which root is it at or below?
+  const char *root = NULL;
+  size_t rdepth = 0;
+  for (size_t i = 0; i < nroots; i++) {
+    size_t d = root_match(path, roots[i]);
+    if (d > rdepth) { rdepth = d; root = roots[i]; }
+  }
+  if (!root || rdepth > ncomp) {
+    set_err(err, err_len, "Listing this directory is not allowed");
+    return -1;
+  }
+
+  // The root itself is the system's; from there on, no symbolic links.
+  int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0) {
+    set_err(err, err_len, "Unable to open directory");
+    return -1;
+  }
+  for (size_t i = rdepth; i < ncomp; i++) {
+    int next = openat(fd, comp[i], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (next < 0) {
+      // Only for the message: the refusal is the failed openat() itself
+      // (ELOOP or ENOTDIR for a symbolic link, depending on the flags).
+      struct stat st;
+      bool link = !fstatat(fd, comp[i], &st, AT_SYMLINK_NOFOLLOW) && S_ISLNK(st.st_mode);
+      close(fd);
+      set_err(err, err_len, link ? "Refusing a symbolic link in the directory path"
+	      : "Unable to open directory");
+      return -1;
+    }
+    close(fd);
+    fd = next;
+  }
+  return fd;
+}
+
 bool fetch_header_value_ok(const char *value) {
   if (!value) return false;
   size_t len = strlen(value);

@@ -83,6 +83,21 @@ bool fetch_send_auth(const char *url);
 bool fetch_write_feed_conf(const char *dir, const char *config, bool gzip, const char *name,
 			   const char *url, char *err, size_t err_len);
 
+// The directories getDirListing may list (it runs as root): the user's
+// storage, where Preware's file picker looks for packages (it includes
+// /media/internal/.developer), and the installed applications.
+#define FETCH_LISTING_ROOTS { "/media/internal", "/media/cryptofs/apps/usr/palm/applications" }
+
+// Open the directory path for listing, if it is one of roots or below one.
+// path is absolute, made of [A-Za-z0-9.+_-] components (a trailing '/' is
+// fine), without empty, "." or ".." components.  Below the root, each
+// component is opened with openat(..., O_NOFOLLOW | O_DIRECTORY) from the
+// one before, so a symbolic link anywhere below the root is refused and
+// nothing can be swapped in between the check and the open.  Returns the
+// directory's descriptor, or -1 with the reason in err.
+int fetch_open_listing_dir(const char *path, const char *const *roots, size_t nroots,
+			   char *err, size_t err_len);
+
 // A value fit for an HTTP header: 1..255 printable characters, no CR/LF.
 bool fetch_header_value_ok(const char *value);
 

@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -274,6 +276,108 @@ static void test_write_feed_conf(void) {
   rmdir(dir);
 }
 
+// ----------------------------------------------------------- dir listing
+
+static int open_fds(void) {
+  int n = 0;
+  DIR *d = opendir("/proc/self/fd");
+  if (!d) return -1;
+  while (readdir(d)) n++;
+  closedir(d);
+  return n;
+}
+
+static bool lists(int fd, const char *name) {
+  if (fd < 0) return false;
+  DIR *d = fdopendir(fd);
+  if (!d) { close(fd); return false; }
+  bool found = false;
+  const struct dirent *de;
+  while ((de = readdir(d)))
+    if (!strcmp(de->d_name, name)) found = true;
+  closedir(d);
+  return found;
+}
+
+static void mkd(const char *base, const char *rel) {
+  char p[700];
+  snprintf(p, sizeof(p), "%s/%s", base, rel);
+  if (mkdir(p, 0755)) { perror(p); abort(); }
+}
+
+static void test_listing(void) {
+  char base[512], r1[600], r2[600], p[1200], err[128];
+  snprintf(base, sizeof(base), "%s/fetch-ls-%d", tmpdir(), (int)getpid());
+  if (mkdir(base, 0700)) { perror(base); abort(); }
+  mkd(base, "internal");
+  mkd(base, "internal/.developer");
+  mkd(base, "internal/sub");
+  mkd(base, "internal/sub/deep");
+  mkd(base, "apps");
+  mkd(base, "apps/org.example.app");
+  mkd(base, "secret");
+  mkd(base, "internalX");
+  mkd(base, "internal/a b");
+  mkd(base, "internal/$(id)");
+  snprintf(p, sizeof(p), "%s/secret/key", base); write_file(p, "k");
+  snprintf(p, sizeof(p), "%s/internal/sub/deep/pkg.ipk", base); write_file(p, "x");
+  snprintf(p, sizeof(p), "%s/internal/file", base); write_file(p, "x");
+  char target[600];
+  snprintf(target, sizeof(target), "%s/secret", base);
+  snprintf(p, sizeof(p), "%s/internal/link", base);
+  if (symlink(target, p)) abort();
+  snprintf(p, sizeof(p), "%s/internal/sub/up", base);
+  if (symlink("../..", p)) abort();
+  snprintf(r1, sizeof(r1), "%s/internal", base);
+  snprintf(r2, sizeof(r2), "%s/apps", base);
+  const char *roots[] = { r1, r2 };
+  int before = open_fds();
+
+#define OPEN(rel) (snprintf(p, sizeof(p), "%s%s", base, rel), fetch_open_listing_dir(p, roots, 2, err, sizeof(err)))
+  check("root listed", lists(OPEN("/internal"), "sub"));
+  check("root with trailing slash listed", lists(OPEN("/internal/"), ".developer"));
+  check(".developer listed", lists(OPEN("/internal/.developer"), ".."));
+  check("nested directory listed", lists(OPEN("/internal/sub/deep/"), "pkg.ipk"));
+  check("second root listed", lists(OPEN("/apps"), "org.example.app"));
+  check("app directory listed", lists(OPEN("/apps/org.example.app"), "."));
+  check("parent of the roots refused", OPEN("") < 0 && OPEN("/") < 0);
+  check("sibling directory refused", OPEN("/secret") < 0);
+  check("look-alike root refused", OPEN("/internalX") < 0);
+  check("\"..\" out of a root refused", OPEN("/internal/../secret") < 0);
+  check("\"..\" inside a root refused", OPEN("/internal/sub/../sub") < 0);
+  check("\".\" refused", OPEN("/internal/./sub") < 0);
+  check("\"//\" refused", OPEN("/internal//sub") < 0);
+  check("symlink out of a root refused", OPEN("/internal/link") < 0 && strstr(err, "symbolic"));
+  check("symlink to an ancestor refused", OPEN("/internal/sub/up") < 0);
+  check("path through a symlink refused", OPEN("/internal/sub/up/secret") < 0);
+  check("file refused", OPEN("/internal/file") < 0);
+  check("missing directory refused", OPEN("/internal/none") < 0);
+  check("relative path refused", fetch_open_listing_dir("internal", roots, 2, err, sizeof(err)) < 0);
+  // these exist, so only the name check refuses them
+  check("shell characters refused even if the directory exists", OPEN("/internal/$(id)") < 0);
+  check("space refused even if the directory exists", OPEN("/internal/a b") < 0);
+  check("newline refused", OPEN("/internal/sub\n") < 0);
+  check("NULL refused", fetch_open_listing_dir(NULL, roots, 2, err, sizeof(err)) < 0);
+  check("no roots, nothing listed", fetch_open_listing_dir(r1, roots, 0, err, sizeof(err)) < 0);
+  check("real root /etc refused", fetch_open_listing_dir("/etc", roots, 2, err, sizeof(err)) < 0);
+#undef OPEN
+  check("no descriptors leaked", open_fds() == before);
+
+  static const char *const files[] = { "secret/key", "internal/sub/deep/pkg.ipk", "internal/file",
+				       "internal/link", "internal/sub/up" };
+  for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+    snprintf(p, sizeof(p), "%s/%s", base, files[i]);
+    unlink(p);
+  }
+  static const char *const dirs[] = { "internal/a b", "internal/$(id)", "internal/sub/deep", "internal/sub", "internal/.developer", "internal",
+				      "apps/org.example.app", "apps", "secret", "internalX" };
+  for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+    snprintf(p, sizeof(p), "%s/%s", base, dirs[i]);
+    rmdir(p);
+  }
+  rmdir(base);
+}
+
 // --------------------------------------------------------------- headers
 
 static void test_header_values(void) {
@@ -471,6 +575,7 @@ int main(void) {
   test_header_values();
   test_send_auth();
   test_write_feed_conf();
+  test_listing();
   test_curl_argv();
   test_gunzip();
   test_threads();

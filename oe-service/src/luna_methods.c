@@ -1417,21 +1417,28 @@ bool get_dir_listing_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
   json_object *object = json_tokener_parse(LSMessageGetPayload(message));
   json_object *id = json_object_object_get(object, "directory");
 
-  if (!id || !json_object_is_type(id, json_type_string) || (strspn(json_object_get_string(id), ALLOWED_CHARS"/") != strlen(json_object_get_string(id)))) {
+  if (!id || !json_object_is_type(id, json_type_string)) {
     if (!LSMessageRespond(message,
 			"{\"returnValue\": false, \"errorCode\": -1, \"errorText\": \"Invalid or missing directory\"}",
 			&lserror)) goto error;
     return true;
   }
 
-  // Start execution of the command to list the directory contents
-  DIR *dp = opendir(json_object_get_string(id));
+  // This lists as root: only the user's storage and the installed
+  // applications, and no symbolic link below them (fetch.h).
+  static const char *const roots[] = FETCH_LISTING_ROOTS;
+  char why[128];
+  int dfd = fetch_open_listing_dir(json_object_get_string(id), roots, sizeof(roots) / sizeof(roots[0]),
+				   why, sizeof(why));
+  DIR *dp = dfd >= 0 ? fdopendir(dfd) : NULL;
+  if (dfd >= 0 && !dp) close(dfd);
 
-  // If the command cannot be started
+  // If the directory cannot be opened
   if (!dp) {
-    if (!LSMessageRespond(message,
-			"{\"returnValue\": false, \"errorCode\": -1, \"errorText\": \"Unable to open directory\"}",
-			&lserror)) goto error;
+    snprintf(buffer, MAXBUFLEN,
+	     "{\"returnValue\": false, \"errorCode\": -1, \"errorText\": \"%s\"}",
+	     dfd >= 0 ? "Unable to open directory" : why);
+    if (!LSMessageRespond(message, buffer, &lserror)) goto error;
 
     // The error report has been sent, so return to webOS.
     return true;
@@ -1442,6 +1449,13 @@ bool get_dir_listing_method(LSHandle* lshandle, LSMessage *message, void *ctx) {
 
   // Loop through the list of directory entries.
   while ((ep = readdir(dp)) != NULL) {
+
+    // Stop before an entry could overrun the reply buffer: a name escapes
+    // to at most six times its length, plus the entry's own text.
+    if (strlen(buffer) + 6 * strlen(ep->d_name) + 64 > MAXBUFLEN) {
+      error = true;
+      break;
+    }
 
     // Start or continue the JSON array
     if (first) {
