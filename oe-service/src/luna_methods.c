@@ -27,11 +27,13 @@
 #include <signal.h>
 #include <sys/select.h>
 #include <sys/wait.h>
+#include <errno.h>
 
 #include <json.h>
 
 #include "luna_service.h"
 #include "luna_methods.h"
+#include "ipk_check.h"
 
 #define ALLOWED_CHARS "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-+_"
 
@@ -1872,6 +1874,7 @@ static appinstaller_result appinstaller_remove(LSMessage *message, const char *p
 }
 
 static bool do_install_package(LSMessage *message, const char *filename, const char *pkg, const char *url, bool useSvc);
+static bool install_staged(LSMessage *message, const char *pathname, const char *pkg, bool useSvc);
 
 //
 // Install a package, then remove the file if it was downloaded for this: once
@@ -1891,14 +1894,17 @@ bool do_install(LSMessage *message, const char *filename, const char *pkg, const
   return result;
 }
 
+//
+// Where packages are copied before they are checked and installed: on the
+// apps partition, so an app-sized package fits, and readable by root only.
+//
+#define STAGING_DIR "/media/cryptofs/apps/.ipkg-staging"
+
 static bool do_install_package(LSMessage *message, const char *filename, const char *pkg, const char *url, bool useSvc) {
   LSError lserror;
   LSErrorInit(&lserror);
 
-  struct stat info;
   char command[MAXLINLEN];
-
-  bool installed = false;
 
   char pathname[MAXNAMLEN];
   sprintf(pathname, "/media/internal/.developer/%s", filename);
@@ -1954,22 +1960,62 @@ static bool do_install_package(LSMessage *message, const char *filename, const c
     }
   }
 
-  /* Extract the package id */
+  /* Copy the package to where only root can change it */
+
+  // /media/internal is writable by everyone: checking the file there and
+  // then installing it would let it be swapped in between.
+  char staged[MAXNAMLEN];
+  char stage_error[256];
+  if (!ipk_stage(pathname, STAGING_DIR, staged, sizeof(staged), stage_error, sizeof(stage_error))) {
+    fprintf(stderr, "Cannot stage %s: %s\n", pathname, stage_error);
+    snprintf(buffer, MAXBUFLEN,
+	     "{\"returnValue\": false, \"errorCode\": -1, \"errorText\": \"%s\", \"stage\": \"failed\"}",
+	     json_escape_str(stage_error));
+    if (!LSMessageRespond(message, buffer, &lserror)) goto error;
+    return true;
+  }
+
+  bool result = install_staged(message, staged, pkg, useSvc);
+  unlink(staged);
+  return result;
+ error:
+  LSErrorPrint(&lserror, stderr);
+  LSErrorFree(&lserror);
+ end:
+  return false;
+}
+
+//
+// Check the staged package at pathname, then install it.  Returns as
+// do_install_package() does.
+//
+static bool install_staged(LSMessage *message, const char *pathname, const char *pkg, bool useSvc) {
+  LSError lserror;
+  LSErrorInit(&lserror);
+
+  char command[MAXLINLEN];
+
+  bool installed = false;
+
+  /* Check the package and extract its id */
+
+  // This service installs as root.  Refuse, before anything is unpacked, a
+  // package with maintainer scripts or with files outside its own
+  // application, package and service directories (ipk_check.h).
   char package[MAXNAMLEN];
-  snprintf(command, MAXLINLEN,
-	   "/usr/bin/ar p %s control.tar.gz | /bin/tar -O -z -x --no-anchored -f - control | /bin/sed -n -e 's/^Package: //p' 2>&1", pathname);
-  strcpy(run_command_buffer, "");
-  if (run_command(command, NULL, NULL) && strlen(run_command_buffer)) {
-    // A bounded copy: the command output comes from the package file itself,
-    // so it cannot be trusted to fit in a MAXNAMLEN sized package name.
-    g_strlcpy(package, run_command_buffer, sizeof(package));
-    strcpy(buffer, "{\"stdOut\": [\"");
-    strcat(buffer, run_command_buffer);
-    strcat(buffer, "\"], \"returnValue\": true, \"stage\": \"identify\"}");
+  char check_error[512];
+  ipk_result checked = ipk_check(pathname, package, sizeof(package), check_error, sizeof(check_error));
+  if (checked == IPK_OK) {
+    snprintf(buffer, MAXBUFLEN, "{\"stdOut\": [\"%s\"], \"returnValue\": true, \"stage\": \"identify\"}",
+	     json_escape_str(package));
     if (!LSMessageRespond(message, buffer, &lserror)) goto error;
   }
   else {
-    if (!report_command_failure(message, command, run_command_buffer, "\"stage\": \"failed\"")) goto end;
+    fprintf(stderr, "Refusing %s: %s\n", pathname, check_error);
+    snprintf(buffer, MAXBUFLEN,
+	     "{\"returnValue\": false, \"errorCode\": -1, \"errorText\": \"%s\", \"stage\": \"failed\"}",
+	     json_escape_str(check_error));
+    if (!LSMessageRespond(message, buffer, &lserror)) goto error;
     return true;
   }
 
@@ -1997,83 +2043,9 @@ static bool do_install_package(LSMessage *message, const char *filename, const c
     return true;
   }
 
-  /* Check for an opkg prerm script, and install it */
-
-  // Room for the longest script path around a MAXNAMLEN sized package name.
-  char prerm[MAXNAMLEN+128];
-  sprintf(prerm, "/media/cryptofs/apps/.scripts/%s/pmPreRemove.script", package);
-
-  // Does the package already have a pmPreRemove script?
-  if (!(!stat(prerm, &info) && info.st_size)) {
-
-    // If not, then copy any opkg prerm script into that spot
-    sprintf(prerm, "/media/cryptofs/apps/var/lib/opkg/info/%s.prerm", package);
-    if (!stat(prerm, &info)) {
-
-      snprintf(command, MAXLINLEN,
-	       "/bin/mkdir -p /media/cryptofs/apps/.scripts/%s 2>&1", package);
-
-      strcpy(run_command_buffer, "{\"stdOut\": [");
-      if (run_command(command, message, passthrough)) {
-	strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"mkdir-prerm\"}");
-	if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-      }
-      else {
-	strcat(run_command_buffer, "]");
-	if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"mkdir-prerm\"")) goto end;
-	// Ignore any error here.
-      }
-
-      snprintf(command, MAXLINLEN,
-	       "/usr/bin/install -m 755 %s /media/cryptofs/apps/.scripts/%s/pmPreRemove.script 2>&1", prerm, package);
-
-      strcpy(run_command_buffer, "{\"stdOut\": [");
-      if (run_command(command, message, passthrough)) {
-	strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"install-prerm\"}");
-	if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-      }
-      else {
-	strcat(run_command_buffer, "]");
-	if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"install-prerm\"")) goto end;
-	// Ignore any error here.
-      }
-    }
-  }
-
-  /* Check for an opkg postinst script, and run it */
-
-  // Room for the longest script path around a MAXNAMLEN sized package name.
-  char postinst[MAXNAMLEN+128];
-  sprintf(postinst, "/media/cryptofs/apps/.scripts/%s/pmPostInstall.script", package);
-
-  // Has the service already executed a postinst script?
-  if (!useSvc || stat(postinst, &info) || !info.st_size) {
-
-    // If not, then execute the opkg postinst script
-    sprintf(postinst, "/media/cryptofs/apps/var/lib/opkg/info/%s.postinst", package);
-    if (!stat(postinst, &info)) {
-
-      if (system("/bin/mount -o remount,rw /") != 0) {
-	fprintf(stderr, "Unable to remount / read-write\n");
-      }
-
-      snprintf(command, MAXLINLEN,
-	       "OPKG_OFFLINE_ROOT=/media/cryptofs/apps /bin/sh %s 2>&1", postinst);
-
-      strcpy(run_command_buffer, "{\"stdOut\": [");
-      if (run_command(command, message, passthrough)) {
-	strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"postinst\"}");
-	installed = true;
-	if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-      }
-      else {
-	strcat(run_command_buffer, "]");
-	installed = false;
-	if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"postinst\"")) goto end;
-	// Ignore any error here.
-      }
-    }
-  }
+  // ipk_check() refused any package with maintainer scripts, so there is no
+  // postinst to run and no prerm to keep: nothing from the package runs as
+  // root, and / is not remounted read-write.
 
   /* Revert any failed installation */
 
@@ -2134,32 +2106,15 @@ bool do_remove(LSMessage *message, const char *package, bool replace, bool *remo
 
   struct stat info;
 
-  // Check for an opkg prerm script
+  // A package installed before maintainer scripts were refused may still
+  // have a prerm.  It is not run: package-supplied shell does not run as root
+  // here, and / is not remounted read-write for it.
   // Room for the longest script path around a MAXNAMLEN sized package name.
   char prerm[MAXNAMLEN+128];
-  sprintf(prerm, "/media/cryptofs/apps/var/lib/opkg/info/%s.prerm", package);
+  snprintf(prerm, sizeof(prerm), "/media/cryptofs/apps/var/lib/opkg/info/%s.prerm", package);
 
   if (!stat(prerm, &info)) {
-
-    if (system("/bin/mount -o remount,rw /") != 0) {
-      fprintf(stderr, "Unable to remount / read-write\n");
-    }
-
-    snprintf(command, MAXLINLEN,
-	     "OPKG_OFFLINE_ROOT=/media/cryptofs/apps /bin/sh %s 2>&1", prerm);
-
-    strcpy(run_command_buffer, "{\"stdOut\": [");
-    if (run_command(command, message, passthrough)) {
-      strcat(run_command_buffer, "], \"returnValue\": true, \"stage\": \"prerm\"}");
-      if (!LSMessageRespond(message, run_command_buffer, &lserror)) goto error;
-    }
-    else {
-      strcat(run_command_buffer, "]");
-      *removed = false;
-      if (!report_command_failure(message, command, run_command_buffer+11, "\"stage\": \"failed\"")) goto end;
-      return true;
-    }
-
+    fprintf(stderr, "Not running the prerm script of %s\n", package);
   }
 
   char appinfo[MAXLINLEN];
