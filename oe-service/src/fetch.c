@@ -187,6 +187,33 @@ bool fetch_url_allowed(const char *url, const char *confdir, char *err, size_t e
   return true;
 }
 
+bool fetch_write_feed_conf(const char *dir, const char *config, bool gzip, const char *name,
+			   const char *url, char *err, size_t err_len) {
+  if (!fetch_safe_name(config) || !fetch_safe_name(name)) {
+    set_err(err, err_len, "Invalid feed or configuration name");
+    return false;
+  }
+  if (!fetch_url_parse(url, NULL, NULL, 0)) {
+    set_err(err, err_len, "Invalid feed URL (http:// or https:// needed)");
+    return false;
+  }
+  char path[4096];
+  int n = snprintf(path, sizeof(path), "%s/%s", dir, config);
+  if (n < 0 || (size_t)n >= sizeof(path)) {
+    set_err(err, err_len, "Configuration path too long");
+    return false;
+  }
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    set_err(err, err_len, "Cannot write the configuration file");
+    return false;
+  }
+  bool ok = dprintf(fd, "%s %s %s\n", gzip ? "src/gz" : "src", name, url) > 0;
+  if (close(fd) != 0) ok = false;
+  if (!ok) set_err(err, err_len, "Cannot write the configuration file");
+  return ok;
+}
+
 bool fetch_developer_path(const char *url, char *path, size_t path_len) {
   static const char prefix[] = "file://" FETCH_DEVELOPER_DIR;
   if (!url || strncmp(url, prefix, sizeof(prefix) - 1)) return false;

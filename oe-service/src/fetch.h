@@ -75,6 +75,14 @@ bool fetch_developer_path(const char *url, char *path, size_t path_len);
 // feed.
 bool fetch_send_auth(const char *url);
 
+// Write the feed configuration file dir/config as one opkg "src" (or
+// "src/gz") line for the feed name at url.  config and name must pass
+// fetch_safe_name(), url fetch_url_parse(); the file is created 0644 or
+// truncated, and not followed if it is a symbolic link.  On false, err holds
+// the reason.
+bool fetch_write_feed_conf(const char *dir, const char *config, bool gzip, const char *name,
+			   const char *url, char *err, size_t err_len);
+
 // A value fit for an HTTP header: 1..255 printable characters, no CR/LF.
 bool fetch_header_value_ok(const char *value);
 

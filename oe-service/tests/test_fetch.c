@@ -219,6 +219,61 @@ static void test_developer_path(void) {
 	!fetch_developer_path("file:///media/internal/.developer/x.ipk", path, 10));
 }
 
+// ------------------------------------------------------------ add config
+
+static void test_write_feed_conf(void) {
+  char dir[512], path[600], victim[600], got[256] = "", err[128];
+  snprintf(dir, sizeof(dir), "%s/fetch-add-%d", tmpdir(), (int)getpid());
+  if (mkdir(dir, 0700)) { perror(dir); abort(); }
+
+  check("feed config written",
+	fetch_write_feed_conf(dir, "mine.conf", true, "mine", "https://f.example/feed", err, sizeof(err)));
+  snprintf(path, sizeof(path), "%s/mine.conf", dir);
+  FILE *f = fopen(path, "r");
+  if (f) { size_t r = fread(got, 1, sizeof(got) - 1, f); got[r] = '\0'; fclose(f); }
+  check("one src/gz line", !strcmp(got, "src/gz mine https://f.example/feed\n"));
+  check("written http feed counts as configured",
+	fetch_write_feed_conf(dir, "plain.conf", false, "plain", "http://p.example/feed", err, sizeof(err)) &&
+	fetch_http_configured("http://p.example/feed/Packages", dir));
+
+  static const char *const bad_urls[] = {
+    "https://f.example/x\"; reboot; echo \"",
+    "https://f.example/$(reboot)",
+    "https://f.example/`reboot`",
+    "https://f.example/x\nsrc evil http://evil.example",
+    "https://f.example/x evil",
+    "file:///etc/shadow",
+  };
+  for (size_t i = 0; i < sizeof(bad_urls) / sizeof(bad_urls[0]); i++) {
+    char what[64];
+    snprintf(what, sizeof(what), "crafted config URL %zu refused", i);
+    check(what, !fetch_write_feed_conf(dir, "x.conf", false, "x", bad_urls[i], err, sizeof(err)));
+  }
+  check("config name '..' refused", !fetch_write_feed_conf(dir, "..", false, "x", "https://f.example/", err, sizeof(err)));
+  check("config name with slash refused",
+	!fetch_write_feed_conf(dir, "../../etc/passwd", false, "x", "https://f.example/", err, sizeof(err)));
+  check("feed name with a space refused",
+	!fetch_write_feed_conf(dir, "x.conf", false, "a b", "https://f.example/", err, sizeof(err)));
+  snprintf(path, sizeof(path), "%s/x.conf", dir);
+  check("nothing written for refused input", access(path, F_OK) != 0);
+
+  snprintf(victim, sizeof(victim), "%s/victim", dir);
+  write_file(victim, "untouched");
+  snprintf(path, sizeof(path), "%s/link.conf", dir);
+  if (symlink(victim, path)) abort();
+  check("symlinked config refused",
+	!fetch_write_feed_conf(dir, "link.conf", false, "x", "https://f.example/", err, sizeof(err)));
+  got[0] = '\0';
+  f = fopen(victim, "r");
+  if (f) { size_t r = fread(got, 1, sizeof(got) - 1, f); got[r] = '\0'; fclose(f); }
+  check("symlink target untouched", !strcmp(got, "untouched"));
+
+  unlink(path); unlink(victim);
+  snprintf(path, sizeof(path), "%s/mine.conf", dir); unlink(path);
+  snprintf(path, sizeof(path), "%s/plain.conf", dir); unlink(path);
+  rmdir(dir);
+}
+
 // --------------------------------------------------------------- headers
 
 static void test_header_values(void) {
@@ -415,6 +470,7 @@ int main(void) {
   test_developer_path();
   test_header_values();
   test_send_auth();
+  test_write_feed_conf();
   test_curl_argv();
   test_gunzip();
   test_threads();
