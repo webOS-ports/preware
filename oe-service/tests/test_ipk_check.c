@@ -285,6 +285,12 @@ static void add_framework_dir_link(buf *d) {
   tar_entry_raw(d, FMT_GNU, "./usr/palm/applications/com.example.app/fw", '2',
 		"/usr/palm/frameworks/", 0777, NULL, 0, NULL, 0);
 }
+// The shape of the LuneOS settings sub-apps (qml -> the settings-common app):
+// an app may not link into another app, system or installed.
+static void add_sibling_app_link(buf *d) {
+  tar_entry_raw(d, FMT_GNU, "./usr/palm/applications/com.example.app/qml", '2',
+		"/usr/palm/applications/org.webosports.app.settings-common/qml", 0777, NULL, 0, NULL, 0);
+}
 static void add_write_through_link(buf *d) {
   tar_entry_raw(d, FMT_GNU, "./usr/palm/applications/com.example.app/lib", '2',
 		"/usr/palm/frameworks/enyo", 0777, NULL, 0, NULL, 0);
@@ -327,6 +333,7 @@ static void test_data_cases(void) {
   case_data("link into the frameworks", add_framework_link, IPK_OK);
   case_data("link into the frameworks with ..", add_framework_link_up, IPK_ERR_TYPE);
   case_data("link to the frameworks directory itself", add_framework_dir_link, IPK_ERR_TYPE);
+  case_data("link into another app", add_sibling_app_link, IPK_ERR_TYPE);
   case_data("file written through an absolute link", add_write_through_link, IPK_ERR_TYPE);
   case_data("file written through a relative link", add_write_through_relative, IPK_ERR_TYPE);
   case_data("'.' component", add_dot_component, IPK_ERR_PATH);
