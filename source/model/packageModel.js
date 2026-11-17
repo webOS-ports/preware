@@ -193,7 +193,7 @@ enyo.kind({
                 splitRes = info.Depends.split(',');
                 for (i = 0; i < splitRes.length; i += 1) {
                     //var r = new RegExp(/(.*)\((.*)\)/); // this regex sucks
-                    r = /^([^\(]*)[\s]*[\(]?([^0-9]*)[\s]*([0-9.]*)[\)]?"/; // this one is win
+                    r = /^([^\(]*)[\s]*[\(]?([^0-9]*)[\s]*([0-9.]*)[\)]?/; // this one is win
                     match = splitRes[i].match(r);
                     if (match) {
                         //for(var m = 0; m < match.length; m++) alert(m + ' [' + match[m] + ']');
@@ -696,6 +696,18 @@ enyo.kind({
         return false;
     },
 
+    //whether dependencies may be taken from this package. On LuneOS only from
+    //LuneOS feeds: the default feeds (preware.LuneOSFeeds) are the legacy webOS
+    //ones, whose libraries are built for the old devices.
+    isDependencySource: function () {
+        if (preware.Platform.isLegacy) {
+            return true;
+        }
+        return (this.feedUrls || []).some(function (u) {
+            return !preware.LuneOSFeeds.defaultFeedFor(u);
+        });
+    },
+
     getDependencies: function (justNeeded) {
         var returnArray = [], d, p;
 
@@ -704,7 +716,8 @@ enyo.kind({
 
                 if (preware.PackagesModel.packages.length > 0) {
                     for (p = 0; p < preware.PackagesModel.packages.length; p += 1) {
-                        if (preware.PackagesModel.packages[p].pkg === this.depends[d].pkg) {
+                        if (preware.PackagesModel.packages[p].pkg === this.depends[d].pkg &&
+                                preware.PackagesModel.packages[p].isDependencySource()) {
                             //alert(preware.PackagesModel.packages[p].title);
                             //for (var t in this.depends[d]) alert(t + ': ' + this.depends[d][t]);
 
@@ -761,7 +774,9 @@ enyo.kind({
         return deps;
     },
 
-    getDependenciesRecursiveFunction: function (justNeeded, depth) {
+    //seen: the packages on the way here, so that packages depending on each
+    //other don't loop forever.
+    getDependenciesRecursiveFunction: function (justNeeded, depth, seen) {
         if (!depth && depth !== 0) {
             depth = 0;
         }
@@ -771,11 +786,15 @@ enyo.kind({
             r,
             recTest;
 
+        seen = (seen || []).concat([this.pkg]);
         if (depTest.length > 0) {
             for (p = 0; p < depTest.length; p += 1) {
+                if (seen.indexOf(preware.PackagesModel.packages[depTest[p]].pkg) !== -1) {
+                    continue;
+                }
                 returnArray.push({d: depth, id: depTest[p]});
 
-                recTest = preware.PackagesModel.packages[depTest[p]].getDependenciesRecursiveFunction(justNeeded, depth + 1);
+                recTest = preware.PackagesModel.packages[depTest[p]].getDependenciesRecursiveFunction(justNeeded, depth + 1, seen);
                 if (recTest.length > 0) {
                     for (r = 0; r < recTest.length; r += 1) {
                         returnArray.push({d: recTest[r].d, id: recTest[r].id});

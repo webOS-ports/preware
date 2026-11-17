@@ -1,4 +1,4 @@
-/*global enyo, preware */
+/*global enyo, preware, $L */
 /*jslint sloppy: true */
 
 //TODO: extract the package filtering logic into a "PackageFilter" singleton.
@@ -28,12 +28,13 @@ enyo.kind({
     //set only while showing the type+category filtered list under "Available Packages".
     currentFilterType: null,
     currentFilterCategory: null,
+    currentFilterFeed: null,
+    //"alpha" or "date": how the package list shown is sorted (the toggle under it).
+    currentSort: "date",
 
     //public components
     published: {
         availablePackages: [],
-        availableTypes: [],
-        availableCategories: [],
         listOfEverything: []
     },
 
@@ -90,38 +91,27 @@ enyo.kind({
         this.currentPackageFilter = this.packageFilters.updatable;
         this.currentFilterType = null;
         this.currentFilterCategory = null;
+        this.currentFilterFeed = null;
+        this.currentSort = this.defaultSort("updatable");
         this.recomputePackageList();
 
         this.doSelected({name: "updatable", packagesLength: this.availablePackages.length});
     },
+    //Available Packages: AppPanels shows the group lists (Types / Feeds /
+    //Categories, see groupCounts), like the original Preware.
     showAvailableTypeList: function () {
         this.currentPackageFilter = this.packageFilters.available;
         this.currentFilterType = null;
         this.currentFilterCategory = null;
-        this.availableTypes = [];
-
-        var i, pkg, availableTypesHash = {}, type;
-        for (i = 0; i < preware.PackagesModel.packages.length; i += 1) {
-            pkg = preware.PackagesModel.packages[i];
-            if (this.checkPackageStatus(pkg)) {
-            	if (availableTypesHash[pkg.type]) {   // already a pkg of this type
-            		availableTypesHash[pkg.type].count++;
-            	} else {
-            		availableTypesHash[pkg.type] = {type: pkg.type, count: 1};
-            	}
-            }
-        }
-        for (type in availableTypesHash) {
-        	this.availableTypes.push(availableTypesHash[type]);
-        }
-        this.availableTypes.sort(function (a,b) { return a.type.localeCompare(b.type);});
-
-        this.doSelected({name: "available", showTypeAndCategoriesPanels: true, typesLength: this.availableTypes.length});
+        this.currentFilterFeed = null;
+        this.doSelected({name: "available"});
     },
     showInstalledPackages: function () {
         this.currentPackageFilter = this.packageFilters.installed;
         this.currentFilterType = null;
         this.currentFilterCategory = null;
+        this.currentFilterFeed = null;
+        this.currentSort = this.defaultSort("installed");
         this.recomputePackageList();
 
         this.doSelected({name: "installed", packagesLength: this.availablePackages.length});
@@ -130,6 +120,8 @@ enyo.kind({
         this.currentPackageFilter = this.packageFilters.all;
         this.currentFilterType = null;
         this.currentFilterCategory = null;
+        this.currentFilterFeed = null;
+        this.currentSort = this.defaultSort("all");
         this.recomputePackageList();
 
         this.doSelected({name: "all", packagesLength: this.availablePackages.length});
@@ -139,42 +131,57 @@ enyo.kind({
         this.currentPackageFilter = this.packageFilters.saved;
         this.currentFilterType = null;
         this.currentFilterCategory = null;
+        this.currentFilterFeed = null;
+        this.currentSort = this.defaultSort("saved");
         this.recomputePackageList();
 
         this.doSelected({name: "saved", packagesLength: this.availablePackages.length});
     },
 
 
-    //public function:
-    filterByCategoryAndType: function (category, type) {
-        this.currentFilterType = type;
-        this.currentFilterCategory = category;
+    //public functions:
+    //the packages of Available Packages chosen in the group lists: filter has
+    //type, category (none for the "All" category) and maybe feed. Like the
+    //original, newest first for "All" or a feed's packages, else by title.
+    filterPackages: function (filter) {
+        this.currentFilterType = filter.type || null;
+        this.currentFilterCategory = filter.category || null;
+        this.currentFilterFeed = filter.feed || null;
+        this.currentSort = this.defaultSort((filter.allCategories || filter.feed) ? "all" : "filtered");
         this.recomputePackageList();
-
-        this.doSelected({name: "filtered", showTypeAndCategoriesPanels: true, packagesLength: this.availablePackages.length});
+        this.doSelected({name: "filtered", packagesLength: this.availablePackages.length});
     },
-    filterCategories: function (type) {
-        this.currentFilterType = type;
-        this.currentFilterCategory = null;
-        this.availableCategories = [];
-
-        var i, pkg, availableCategoriesHash = {}, category;
-        for (i = 0; i < preware.PackagesModel.packages.length; i += 1) {
-            pkg = preware.PackagesModel.packages[i];
-            if (this.checkPackageStatus(pkg) && pkg.type === type) {
-            	if (availableCategoriesHash[pkg.category]) {   // already a package in this category
-            		availableCategoriesHash[pkg.category].count++;
-            	} else {
-            		availableCategoriesHash[pkg.category] = {category: pkg.category, count: 1};
-            	}
+    //a group list of Available Packages: the types, feeds or categories (kind)
+    //of the packages that match filter ({type, feed, category}, each optional),
+    //with how many there are, by name. A package can be in several feeds.
+    groupCounts: function (kind, filter) {
+        var counts = {}, out = [], name, field = {types: "type", feeds: "feed", categories: "category"}[kind];
+        preware.PackagesModel.packages.forEach(function (pkg) {
+            if (!this.checkPackageStatus(pkg) ||
+                    (field !== "type" && filter.type && pkg.type !== filter.type) ||
+                    (field !== "category" && filter.category && pkg.category !== filter.category) ||
+                    (field !== "feed" && filter.feed && !pkg.inFeed(filter.feed))) {
+                return;
+            }
+            (field === "feed" ? pkg.feeds : [pkg[field]]).forEach(function (n) {
+                counts[n] = (counts[n] || 0) + 1;
+            });
+        }, this);
+        for (name in counts) {
+            if (counts.hasOwnProperty(name)) {
+                out.push({name: name, count: counts[name]});
             }
         }
-        for (category in availableCategoriesHash) {   // xform hash to array
-        	this.availableCategories.push(availableCategoriesHash[category]);
+        out.sort(function (a, b) {
+            return a.name.localeCompare(b.name);
+        });
+        //the categories start with "All", like the original's: all of them.
+        if (field === "category" && out.length) {
+            out.unshift({name: $L("All"), all: true, count: out.reduce(function (sum, c) {
+                return sum + c.count;
+            }, 0)});
         }
-        this.availableCategories.sort(function (a,b) { return a.category.localeCompare(b.category);});
-
-        this.doSelected({name: "filtered", showTypeAndCategoriesPanels: true, categoriesLength: this.availableCategories.length});
+        return out;
     },
     checkPackageStatus: function (pkg) {
         if (!pkg) {
@@ -218,6 +225,9 @@ enyo.kind({
             if (this.currentFilterCategory !== null && pkg.category !== this.currentFilterCategory) {
                 continue;
             }
+            if (this.currentFilterFeed !== null && !pkg.inFeed(this.currentFilterFeed)) {
+                continue;
+            }
             if (this.availablePackages.indexOf(pkg) === -1) {
                 this.availablePackages.push(pkg);
             }
@@ -253,28 +263,35 @@ enyo.kind({
 
 
     //auxillary package handling stuff:
-    //sorts the package list by the "Sort Order" preference ("Category Default"
-    //is by title). The comparison has to be consistent, or Array.sort mixes the
-    //list up (a comparison that said "first" for every undated package reversed it).
+    //how a list is sorted when it opens: the "Default sort" preference, or with
+    //"Category Default" what the original Preware does: by title for the installed
+    //and saved packages and a category's packages, newest first for the others
+    //(Package Updates, List of Everything, search results).
+    defaultSort: function (listName) {
+        var pref = preware.PrefCookie.get().listSort;
+        if (pref === "alpha" || pref === "date") {
+            return pref;
+        }
+        return (listName === "installed" || listName === "saved" || listName === "filtered") ? "alpha" : "date";
+    },
     sortPackageList: function () {
-        var sort = preware.PrefCookie.get().listSort,
-            //some feeds have titles starting with a space (modernize)
-            title = function (p) {
-                return String(p.title || p.pkg || "").replace(/^\s+/, "").toLowerCase();
-            },
+        this.sortPackages(this.availablePackages, this.currentSort);
+    },
+    //sorts packages by title ("alpha") or newest first ("date", undated ones
+    //last). The comparison has to be consistent, or Array.sort mixes the list up
+    //(a comparison that said "first" for every undated package reversed it).
+    sortPackages: function (packages, sort) {
+        var title = this.sortTitle,
             byTitle = function (a, b) {
                 var x = title(a), y = title(b);
                 return x < y ? -1 : (x > y ? 1 : 0);
             },
-            number = function (v) {
-                var n = parseFloat(String(v).replace(/[^0-9.]/g, ""));
-                return isNaN(n) ? undefined : n;
-            },
+            date = this.packageDate,
             compare = byTitle;
 
-        if (sort === "date") { //newest first, undated ones last
+        if (sort === "date") {
             compare = function (a, b) {
-                var x = number(a.date) || undefined, y = number(b.date) || undefined; //0: unknown
+                var x = date(a), y = date(b);
                 if (x !== y) {
                     if (x === undefined) {
                         return 1;
@@ -287,6 +304,53 @@ enyo.kind({
                 return byTitle(a, b);
             };
         }
-        this.availablePackages.sort(compare);
+        packages.sort(compare);
+        return packages;
+    },
+    //some feeds have titles starting with a space (modernize)
+    sortTitle: function (p) {
+        return String(p.title || p.pkg || "").replace(/^\s+/, "").toLowerCase();
+    },
+    //last updated, in seconds, or undefined (0 means unknown too).
+    packageDate: function (p) {
+        var n = parseFloat(String(p.date).replace(/[^0-9.]/g, ""));
+        return (isNaN(n) || !n) ? undefined : n;
+    },
+    //the divider above a package in a list sorted by sort (the original Preware's):
+    //how long ago it was updated, or with letters the first letter of its title.
+    //now: the time in seconds.
+    sortDivider: function (p, sort, letters, now) {
+        var d, age, c;
+        if (sort === "date") {
+            d = this.packageDate(p);
+            if (d === undefined) {
+                return $L("Unknown");
+            }
+            age = now - d;
+            if (age <= 86400) {
+                return $L("Today");
+            }
+            if (age <= 172800) {
+                return $L("Yesterday");
+            }
+            if (age <= 604800) {
+                return $L("This Week");
+            }
+            if (age <= 1209600) {
+                return $L("Last Week");
+            }
+            if (age <= 2629744) {
+                return $L("This Month");
+            }
+            if (age <= 5259488) {
+                return $L("Last Month");
+            }
+            return $L("Older");
+        }
+        if (letters) {
+            c = this.sortTitle(p).charAt(0).toUpperCase();
+            return (c >= "A" && c <= "Z") ? c : "#";
+        }
+        return "";
     }
 });

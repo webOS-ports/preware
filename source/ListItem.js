@@ -43,6 +43,12 @@ enyo.kind({
     showIcon: function(show) {
         this.$.ItemIcon.applyStyle("display", show ? "inline-block" : "none");
     },
+    //a divider above the item (sorted package lists: Today, A...), or none
+    //(""). Drawn by CSS (list-item-divided), so a long list needs no more controls.
+    setDivider: function(text) {
+        this.setAttribute("data-divider", text || null);
+        this.addRemoveClass("list-item-divided", !!text);
+    },
     //many feed icons are hosted on sites that are gone.
     iconError: function(inSender) {
         this.showIcon(false);

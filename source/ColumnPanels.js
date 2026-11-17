@@ -87,20 +87,28 @@ enyo.kind({
         }
         return -1;
     },
-    //which panels to show, from left to right.
-    visiblePanels: function (width) {
+    //which panels to show, from left to right, when panel index (default: the
+    //current one) is active.
+    visiblePanels: function (width, index) {
         var prev;
-        if (width < this.columnModeWidth) {
-            return [this.index];
+        if (index === undefined) {
+            index = this.index;
         }
-        if (this.index === 0) {
+        if (width < this.columnModeWidth) {
+            return [index];
+        }
+        if (index === 0) {
             return [0];
         }
-        prev = this.previousPanel(this.index);
+        prev = this.previousPanel(index);
         if (prev > 0 && width - this.menuWidth >= this.twoColumnWidth) {
-            return [0, prev, this.index];
+            return [0, prev, index];
         }
-        return [0, this.index];
+        return [0, index];
+    },
+    //true if, with panel index active, the panel left of it is shown next to it.
+    showsColumnBefore: function (index) {
+        return this.hasNode() && this.visiblePanels(this.node.clientWidth, index).length > 2;
     },
     layoutColumns: function () {
         if (!this.hasNode()) {

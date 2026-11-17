@@ -406,6 +406,21 @@
 .preware-grabber-toolbar {
     position: relative;
     text-align: center;
+    /* centre the buttons vertically: onyx's padding and the buttons' margins
+       were more than the bar's height, so they sat at its bottom. An empty
+       full-height item sets the middle the others line up on. */
+    padding-top: 0;
+    padding-bottom: 0;
+}
+.preware-grabber-toolbar:before {
+    content: "";
+    display: inline-block;
+    height: 100%;
+    vertical-align: middle;
+}
+.preware-grabber-toolbar > * {
+    margin-top: 0;
+    margin-bottom: 0;
 }
 .preware-grabber-area {
     position: absolute;
@@ -473,4 +488,44 @@
 }
 .enyo-appmenu .enyo-item:last-child {
     border-bottom: none;
+}
+
+/* dividers in sorted package lists (Today, Last Week..., or A, B...), like the
+   original Preware's: drawn above the item (ListItem.setDivider) */
+.list-item.list-item-divided {
+    margin-top: 23px;
+}
+.list-item.list-item-divided:before {
+    content: attr(data-divider);
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -23px;
+    height: 18px;
+    padding: 3px 10px 0 10px;
+    color: #8fb4e0;
+    background-color: #262626;
+    border-bottom: 1px solid #3a6ea5;
+    font-size: 13px;
+    font-weight: bold;
+    line-height: 18px;
+    text-transform: uppercase;
+}
+
+/* A-Z / Date under package lists and search results */
+.onyx-toolbar .preware-sort-toggle {
+    margin-left: 8px;
+}
+.preware-sort-toggle .onyx-radiobutton {
+    min-width: 54px;
+}
+
+/* a toolbar title that can be longer than its column */
+.preware-toolbar-title {
+    display: inline-block;
+    position: absolute;
+    max-width: 90%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }

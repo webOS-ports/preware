@@ -15,6 +15,7 @@ enyo.kind({
             onPackageRefresh: "handlePackageRefresh",
             onBackendSimpleMessage: "processSimpleMessage",
             onPackageProgressMessage: "processProgressMessage",
+            onPackageActionMessage: "processActionMessage",
             onDismissMessages: "hideMessages"
         },
 		{name: "openService", kind: "enyo.PalmService", service: "palm://com.palm.applicationManager/", method: "open", onError: "openError"},
@@ -146,18 +147,20 @@ enyo.kind({
                 {kind: "onyx.Button", classes: "onyx-blue", style: "display: block; width: 100%; margin-top: 4px;", content: "OK", ontap: "hideSimpleMessage"}
             ]
         },
+        //a question with several answers (e.g. the package needs other packages),
+        //like the original Preware's action message. See displayActionMessage.
         {
             name: "ActionMessage",
             kind: "Toast",
+            style: "height: auto; padding-bottom: 10px;",
             components: [
                 {
                     name: "ActionMessageContent",
-                    style: "display: block; font-size: 14pt; height: 46px;",
+                    style: "display: block; font-size: 14pt; padding: 4px 8px; white-space: normal; word-wrap: break-word;",
                     allowHtml: true,
                     content: "Message<br>I am a fish."
                 },
-                {kind: "onyx.Button", style: "display: block; width: 100%; margin-top: 10px;", content: "Button 1", ontap: "hideActionMessage"},
-                {kind: "onyx.Button", style: "display: block; width: 100%; margin-top: 10px;",  content: "Button 2", ontap: "hideActionMessage"}
+                {name: "ActionButtons"}
             ]
         },
         {
@@ -291,25 +294,61 @@ enyo.kind({
     hideProgressMessage: function () {
         this.$.ProgressMessage.animateToMax();
     },
+    //inEvent: {pkg, message, choices: [{label, value, classes}], callback(value)}.
+    //The details show the package the question is about.
+    processActionMessage: function (inSender, inEvent) {
+        if (inEvent.pkg && inEvent.pkg !== this.currentPackage) {
+            this.setCurrentPackage(inEvent.pkg);
+        }
+        this.displayActionMessage(inEvent);
+    },
     displayActionMessage: function (inEvent) {
+        var i, c;
         this.hideSimpleMessage();
         this.hideProgressMessage();
+        this.answerActionMessage("cancel"); //an older question still open
 
         this.$.ActionMessageContent.setContent(inEvent.message);
+        this.$.ActionButtons.destroyClientControls();
+        for (i = 0; i < inEvent.choices.length; i += 1) {
+            c = inEvent.choices[i];
+            this.$.ActionButtons.createComponent({kind: "onyx.Button", value: c.value,
+                style: "display: block; width: 100%; margin-top: 10px;", content: c.label,
+                ontap: "actionButtonTapped"}, {owner: this}).addClass(c.classes || "");
+        }
+        this.$.ActionButtons.render();
+        this.actionCallback = inEvent.callback;
         if (this.$.ActionMessage.value !== this.$.ActionMessage.min) {
             this.$.ActionMessage.animateToMin();
         }
     },
-    hideActionMessage: function () {
-        this.$.ActionMessage.animateToMax();
+    actionButtonTapped: function (inSender) {
+        this.answerActionMessage(inSender.value);
+        return true;
     },
+    //hides the question and gives the answer to whoever asked.
+    answerActionMessage: function (value) {
+        var callback = this.actionCallback;
+        this.actionCallback = null;
+        this.hideActionMessage();
+        if (callback) {
+            callback(value);
+        }
+    },
+    hideActionMessage: function () {
+        if (this.$.ActionMessage.value !== this.$.ActionMessage.max) {
+            this.$.ActionMessage.animateToMax();
+        }
+    },
+    //another package: a question about the one before is cancelled.
     currentPackageChanged: function () {
+        this.answerActionMessage("cancel");
         this.refreshPackageDisplay();
     },
     hideMessages: function() {
         this.hideSimpleMessage();
-        this.hideActionMessage();
-        this.hideProgressMessage();    
+        this.answerActionMessage("cancel");
+        this.hideProgressMessage();
     },
 
     //public functions:
