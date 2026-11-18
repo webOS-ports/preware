@@ -124,12 +124,7 @@ enyo.kind({
     setupContentItem: function (inSender, inEvent) {
         var index = inEvent.index,
             item = inEvent.item;
-        item.$.listItem.$.ItemTitle.setContent(this.currentContent[index].name);
-        if (this.currentContent[index].type === "directory") {
-            item.$.listItem.$.ItemIcon.setSrc("assets/folder.png");
-        } else {
-            item.$.listItem.$.ItemIcon.setSrc("assets/file.png");
-        }
+        item.$.listItem.set("title", this.currentContent[index].name);
         return true;
     },
     handleBackGesture: function (inSender, inEvent) {

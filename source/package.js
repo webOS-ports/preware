@@ -7,6 +7,7 @@ enyo.depends(
     "App.css",
     "SearchHeader.js",
     "App.js",
+    "ChunkedRepeater.js",
     "ColumnPanels.js",
     "AppPanels.js",
     "EmptyPanel.js",

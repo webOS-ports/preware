@@ -396,7 +396,7 @@ static void test_send_auth(void) {
   check("host compared case-insensitively", fetch_send_auth("https://FEEDS.webos-ports.ORG/x"));
   check("port does not matter", fetch_send_auth("https://feeds.webos-ports.org:443/x"));
   check("official feed over http gets none", !fetch_send_auth("http://feeds.webos-ports.org/x"));
-  check("third-party https feed gets none", !fetch_send_auth("https://feed.pivotce.com/Packages"));
+  check("third-party https feed gets none", !fetch_send_auth("https://feed.example.com/Packages"));
   check("suffix look-alike gets none", !fetch_send_auth("https://feeds.webos-ports.org.evil.example/x"));
   check("prefix look-alike gets none", !fetch_send_auth("https://evilfeeds.webos-ports.org/x"));
   check("subdomain gets none", !fetch_send_auth("https://a.feeds.webos-ports.org/x"));

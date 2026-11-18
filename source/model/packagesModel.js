@@ -350,8 +350,19 @@ enyo.singleton({
             newPkg.location = url + '/' + newPkg.filename;
         }
 
+        // the feeds the package was found in (none: only in the status file)
+        newPkg.feedUrls = url ? [url] : [];
+
         // look for a previous package with the same name
         pkgNum = this.packageInList(newPkg.pkg);
+        if (pkgNum !== false) {
+            (this.packages[pkgNum].feedUrls || []).forEach(function (u) {
+                if (newPkg.feedUrls.indexOf(u) === -1) {
+                    newPkg.feedUrls.push(u);
+                }
+            });
+            this.packages[pkgNum].feedUrls = newPkg.feedUrls;
+        }
         if (pkgNum === false) {
             // add this package to global app list
             this.packages.push(newPkg);
@@ -640,48 +651,49 @@ enyo.singleton({
         }
     },
 
-    //asks user if it should install multiple packages. If so, calls testMultiInstall.
+    //the package needs other packages installed or updated first: ask the user,
+    //like the original Preware: install them all, view them, or cancel.
+    //Nothing is kept here until the user answers (another question can cancel this one).
     checkMultiInstall: function (pkg, pkgs) {
         try {
-            this.multiPkg    = pkg;
-            this.multiPkgs    = pkgs;
-            this.multiFlags    = this.getMultiFlags();
-
-            // see what they want to do:
-            //TODO!!!
-            //this.assistant.actionMessage(
-                //$L("This package depends on <b>") + this.multiPkgs.length + $L("</b> other package") + (this.multiPkgs.length>1?'s':'') + $L(" to be installed or updated."),
-            //[
-                //{label:$L("Install / Update ") + (this.multiPkgs.length>1?$L("Them"):$L("It")), value:'ok'},
-                //{label:$L("View ") + (this.multiPkgs.length>1?$L("Them"):$L("It")), value:'view'},
-                //{label:$L("Cancel"), value:'cancel'}
-            //],
-            //this.testMultiInstall.bindAsEventListener(this)
-            //);
-            this.testMultiInstall("ok");
+            enyo.Signals.send("onPackageActionMessage", {
+                pkg: pkg,
+                message: $L("This package depends on <b>") + pkgs.length + $L("</b> other package") + (pkgs.length > 1 ? 's' : '') + $L(" to be installed or updated."),
+                choices: [
+                    {label: $L("Install / Update ") + (pkgs.length > 1 ? $L("Them") : $L("It")), value: 'ok', classes: "onyx-affirmative"},
+                    {label: $L("View ") + (pkgs.length > 1 ? $L("Them") : $L("It")), value: 'view'},
+                    {label: $L("Cancel"), value: 'cancel'}
+                ],
+                callback: this.testMultiInstall.bind(this, pkg, pkgs)
+            });
         } catch (e) {
             console.error('error in packagesModel#checkMultiInstall: ' + e);
         }
     },
 
-    //this was used to react to the question towards the user and either install or show the packages to be installed.
-    testMultiInstall: function (value) {
-        switch (value) {
-        case 'ok':
-            //this.assistant.displayAction($L("Installing / Updating"));
-            //this.assistant.startAction();
-            this.multiPkgs.push(this.packagesReversed[this.multiPkg.pkg] - 1); //add package with dependencies to be list of packages to be installed as last one.
-            this.doMultiInstall(0);
-            break;
-
-        case 'view': //TODO!!!!
-            //this.assistant.controller.stageController.pushScene('pkg-connected', 'install', this.multiPkg, this.multiPkgs);
-            this.multiPkg    = false;
-            this.multiPkgs   = false;
-            this.multiFlags  = false;
-            break;
+    //the answer to checkMultiInstall.
+    testMultiInstall: function (pkg, pkgs, value) {
+        if (value === 'ok') {
+            if (!this.startMultiInstall(pkg, pkgs)) {
+                this.doSimpleMessage($L("Please wait until the packages being installed are done."));
+            }
+        } else if (value === 'view') {
+            enyo.Signals.send("onShowConnectedPackages", {type: 'install', pkg: pkg});
         }
-        return;
+    },
+
+    //installs/updates the packages pkgs, then the package pkg (they are what it needs).
+    startMultiInstall: function (pkg, pkgs) {
+        if (this.multiPkgs) {
+            return false; //one is running already
+        }
+        this.multiPkg = pkg;
+        this.multiPkgs = pkgs.slice();
+        this.multiPkgs.push(this.packagesReversed[pkg.pkg] - 1); //the package itself goes last.
+        this.multiFlags = this.getMultiFlags();
+        this.doMyApps = false;
+        this.doMultiInstall(0);
+        return true;
     },
 
     //Update All (the Package Updates list): updates the packages one after the
@@ -726,19 +738,48 @@ enyo.singleton({
         this.doMultiInstall(0);
         return true;
     },
-    //a package of a multi install is done: note a failure (the rest still goes on) and do the next.
+    //a package of a multi install is done: note a failure and do the next.
+    //Update All goes on after a failure (the updates don't need each other). A
+    //package and what it needs stop at the first failure, like the original
+    //Preware: the packages after it may need the one that failed.
     multiStepDone: function (number, errorMsg) {
-        var pkg;
+        var pkg, i;
         if (!this.multiPkgs || number !== this.multiCurrent) {
             return; //a second answer for a package already done
         }
         pkg = this.packages[this.multiPkgs[number]];
         if (errorMsg) {
             this.multiFailed.push("<b>" + enyo.dom.escape(pkg.title || pkg.pkg) + "</b>: " + errorMsg);
+            if (!this.multiUpdateAll) {
+                this.multiStopped = {pkg: pkg, error: errorMsg};
+                for (i = number + 1; i < this.multiPkgs.length; i += 1) {
+                    this.multiSkipped.push(this.packageTitle(this.packages[this.multiPkgs[i]]));
+                }
+                this.doMultiInstall(this.multiPkgs.length);
+                return;
+            }
         } else {
             this.multiDone += 1;
+            this.multiInstalled.push(this.multiPkgs[number]);
+            this.multiInstalledFlags.push(pkg.flags[this.multiStepKind] || {});
         }
         this.doMultiInstall(number + 1);
+    },
+    packageTitle: function (pkg) {
+        return enyo.dom.escape((pkg.title || pkg.pkg).replace(/^\s+/, ""));
+    },
+    //the restarts all of flagsList (PostInstallFlags/PostUpdateFlags) need.
+    flagsFor: function (flagsList) {
+        var flags = {RestartLuna: false, RestartJava: false, RestartDevice: false}, i, f, k;
+        for (i = 0; i < flagsList.length; i += 1) {
+            f = flagsList[i];
+            for (k in flags) {
+                if (flags.hasOwnProperty(k) && f[k]) {
+                    flags[k] = true;
+                }
+            }
+        }
+        return flags;
     },
 
     doMultiInstall: function (number) {
@@ -747,6 +788,10 @@ enyo.singleton({
             if (number === 0) {
                 this.multiDone = 0;
                 this.multiFailed = [];
+                this.multiSkipped = [];
+                this.multiInstalled = [];
+                this.multiInstalledFlags = [];
+                this.multiStopped = null;
             }
             this.multiCurrent = number;
             // call install for dependencies
@@ -754,6 +799,7 @@ enyo.singleton({
                 if (this.multiUpdateAll) {
                     enyo.Signals.send("onUpdateAllPackage", {pkg: pkg});
                 }
+                this.multiStepKind = pkg.isInstalled ? 'update' : 'install';
                 //package is from appCatalog (?)
                 if (pkg.appCatalog && !preware.PrefCookie.get().useTuckerbox) {
                     this.doMyApps = true;
@@ -804,12 +850,29 @@ enyo.singleton({
 
                 if (this.multiUpdateAll) {
                     msg = this.multiDone === 1 ? $L("1 package updated") : this.multiDone + $L(" packages updated");
+                    if (this.multiFailed.length > 0) {
+                        msg += ", " + this.multiFailed.length + $L(" failed");
+                    }
+                } else if (this.multiStopped) {
+                    //which one failed first, then what that left out, then the error (it can be long)
+                    msg = "<b>" + $L("Installation stopped:") + " " + this.packageTitle(this.multiStopped.pkg) + " " + $L("could not be installed.") + "</b>";
+                    if (this.multiInstalled.length > 0) {
+                        msg += "<br /><br />" + $L("Installed: ") + this.multiInstalled.map(function (n) {
+                            return this.packageTitle(this.packages[n]);
+                        }, this).join(", ");
+                    }
+                    if (this.multiSkipped.length > 0) {
+                        msg += "<br /><br />" + $L("Not installed: ") + this.multiSkipped.join(", ");
+                    }
+                    msg += "<br /><br />" + this.multiStopped.error;
                 } else {
                     msg = $L("Packages installed");
                 }
-                if (this.multiFailed.length > 0) {
+                if (this.multiUpdateAll && this.multiFailed.length > 0) {
                     msg += "<br /><br />" + $L("Failed:") + "<br />" + this.multiFailed.join("<br />");
                 }
+                //only the restarts of what got installed
+                this.multiFlags = this.flagsFor(this.multiInstalledFlags);
                 this.doSimpleMessage(msg);
                 //no restart for nothing: only when something got installed
                 if (this.multiDone > 0 && (this.multiFlags.RestartLuna || this.multiFlags.RestartJava || this.multiFlags.RestartDevice)) {
@@ -833,58 +896,33 @@ enyo.singleton({
         }
     },
 
+    //other installed packages depend on the package: it can't be removed (like
+    //the original Preware, which has "Remove Anyways" commented out). The user
+    //can view them.
     checkMultiRemove: function (pkg, pkgs) {
-        var i, msg;
+        var n = pkgs.length;
         try {
-            this.multiPkg    = pkg;
-            this.multiPkgs    = pkgs;
-            this.multiFlags    = this.getMultiFlags();
-
-            //did not find a replacement for interpolate, yet.. what?
-            //var localizedText=$L("This package has <b>#{num}</b> other installed #{package} that #{depend} on it. <br /><br />Removing this package may cause #{them} to no longer function.").interpolate({num: this.multiPkgs.length, package: (this.multiPkgs.length>1 ? $L("packages") : $L("package")), depend: (this.multiPkgs.length>1 ? $L("depend") : $L("depends")), them: (this.multiPkgs.length>1 ? $L("them") : $L("it"))})
-
-            // see what they want to do:
-            //this.assistant.actionMessage(
-            //    localizedText,
-            //    [
-                    // uncomment to allow removing of itself
-                    //{label:$L('Remove Anyways'), value:'ok'},
-            //        {label:$L("View ") + (this.multiPkgs.length>1?$L("Them"):$L("It")), value:'view'},
-            //        {label:$L("Cancel"), value:'cancel'}
-            //    ],
-            //    this.testMultiRemove.bind(this)
-            //);
-            msg = $L("This package has other installed packages that depend on it. Can't remove it. Depending packages: ");
-            for (i = 0; i < this.multiPkgs.length; i += 1) {
-                msg += this.packages[this.multiPkgs[i]].title;
-                if (i !== this.multiPkgs.length - 1) {
-                    msg += ", ";
-                }
-            }
-            this.doSimpleMessage(msg);
-            this.testMultiRemove("cancel");
+            enyo.Signals.send("onPackageActionMessage", {
+                pkg: pkg,
+                message: $L("This package has <b>") + n + $L("</b> other installed ") + (n > 1 ? $L("packages") : $L("package")) +
+                    " " + (n > 1 ? $L("that depend") : $L("that depends")) + $L(" on it.<br /><br />Removing this package may cause ") +
+                    (n > 1 ? $L("them") : $L("it")) + $L(" to no longer function."),
+                choices: [
+                    {label: $L("View ") + (n > 1 ? $L("Them") : $L("It")), value: 'view'},
+                    {label: $L("Cancel"), value: 'cancel'}
+                ],
+                callback: this.testMultiRemove.bind(this, pkg)
+            });
         } catch (e) {
             console.error('packagesModel#checkMultiRemove: ' + e);
         }
     },
 
-    testMultiRemove: function (value) {
-        switch (value) {
-        case 'ok':
-            this.multiPkg.doRemove(true);
-            this.multiPkg    = false;
-            this.multiPkgs    = false;
-            this.multiFlags    = false;
-            break;
-        case 'view':
-            console.error("View not yet implemented...");
-            //this.assistant.controller.stageController.pushScene('pkg-connected', 'remove', this.multiPkg, this.multiPkgs);
-            this.multiPkg    = false;
-            this.multiPkgs    = false;
-            this.multiFlags    = false;
-            break;
+    //the answer to checkMultiRemove.
+    testMultiRemove: function (pkg, value) {
+        if (value === 'view') {
+            enyo.Signals.send("onShowConnectedPackages", {type: 'remove', pkg: pkg});
         }
-        return;
     },
 
     //utility function to generate install messages
