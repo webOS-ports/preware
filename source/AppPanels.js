@@ -137,6 +137,7 @@ enyo.kind({
                         {
                             name: "PackageScroller",
                             kind: "Scroller",
+                            onScroll: "packageListScrolled",
                             horizontal: "hidden",
                             classes: "enyo-fill",
                             style: "background-image:url('assets/bg.png')",
@@ -144,7 +145,7 @@ enyo.kind({
                             fit: true,
                             components: [
                                 {name: "NoPackages", showing: false, style: "color: white; text-align: center; padding: 24px;", content: $L("No packages")},
-                                {name: "PackageRepeater", kind: "Repeater", onSetupItem: "setupPackageItem", count: 0, components: [
+                                {name: "PackageRepeater", kind: "preware.ChunkedRepeater", onSetupItem: "setupPackageItem", count: 0, components: [
                                     {kind: "ListItem", title: "[package]", icon: true, ontap: "packageTapped"}
                                 ]}
                             ]
@@ -169,6 +170,7 @@ enyo.kind({
                         {
                             name: "SearchScroller",
                             kind: "Scroller",
+                            onScroll: "searchListScrolled",
                             horizontal: "hidden",
                             classes: "enyo-fill",
                             style: "background-image:url('assets/bg.png')",
@@ -176,7 +178,7 @@ enyo.kind({
                             fit: true,
                             components: [
                                 {name: "NoSearchResults", showing: false, style: "color: white; text-align: center; padding: 24px;", content: $L("No packages found")},
-                                {name: "SearchRepeater", kind: "Repeater", onSetupItem: "setupSearchItem", count: 0, components: [
+                                {name: "SearchRepeater", kind: "preware.ChunkedRepeater", onSetupItem: "setupSearchItem", count: 0, components: [
                                     {kind: "ListItem", title: "[package]", icon: true, ontap: "searchResultTapped"}
                                 ]}
                             ]
@@ -343,8 +345,7 @@ enyo.kind({
         var count = this.$.packagesMenu.refreshLists();
         this.refreshGroups();
         if (count >= 0) {
-            this.$.PackageRepeater.setCount(0);
-            this.$.PackageRepeater.setCount(count);
+            this.$.PackageRepeater.rebuild(count);
             this.$.NoPackages.setShowing(count === 0);
         }
         if (this.isShowingConnected()) {
@@ -429,22 +430,30 @@ enyo.kind({
         }
     },
     //shows count items in repeater again. With the same count (the list was
-    //sorted again) the items it has are set up again: building a long list
-    //anew takes many seconds on a TouchPad (the List of Everything 12).
+    //sorted again) the rows it has built are set up again, which is quicker
+    //than building them anew (a ChunkedRepeater may have built only some).
     refillRepeater: function (repeater, count) {
         var items = repeater.getClientControls(), i;
-        if (count > 0 && repeater.count === count && items.length === count) {
+        if (count > 0 && repeater.count === count && items.length > 0 && items.length <= count) {
             //the highlighted item now shows another package
             if (this.selectedItems && this.selectedItems.list && !this.selectedItems.list.destroyed) {
                 this.selectedItems.list.removeClass("list-item-active");
             }
-            for (i = 0; i < count; i += 1) {
+            for (i = 0; i < items.length; i += 1) {
                 repeater.doSetupItem({index: i, item: items[i]});
             }
         } else {
             repeater.setCount(0);
             repeater.setCount(count);
         }
+    },
+    //package lists and search results build their rows as they are scrolled to
+    //(preware.ChunkedRepeater).
+    packageListScrolled: function () {
+        this.$.PackageRepeater.moreIfNear(this.$.PackageScroller);
+    },
+    searchListScrolled: function () {
+        this.$.SearchRepeater.moreIfNear(this.$.SearchScroller);
     },
     //sets up the divider above item index of list, sorted by sort.
     setupDivider: function (item, list, index, sort, letters) {
@@ -470,6 +479,7 @@ enyo.kind({
         if (inEvent.packagesLength >= 0) {
             this.$.PackageRepeater.setCount(0);
             this.$.PackageRepeater.setCount(inEvent.packagesLength);
+            this.$.PackageScroller.scrollToTop();
             this.$.NoPackages.setShowing(inEvent.packagesLength === 0);
             this.$.PackagePanels.setIndex(1);
             this.setIndex(this.packagePanelsIndex);
@@ -676,8 +686,7 @@ enyo.kind({
         var pkg = this.searchResults[inEvent.index];
         if (pkg) {
             this.setupDivider(inEvent.item, this.searchResults, inEvent.index, this.searchSort, true);
-            inEvent.item.$.listItem.$.ItemTitle.setContent(pkg.title);
-            inEvent.item.$.listItem.setIcon(pkg.icon);
+            inEvent.item.$.listItem.setTitleAndIcon(pkg.title, pkg.icon);
         }
         return true;
     },
@@ -763,8 +772,7 @@ enyo.kind({
     setupConnectedItem: function (inSender, inEvent) {
         var c = this.connected, pkg = c && c.list[inEvent.index], item = inEvent.item;
         if (pkg) {
-            item.$.listItem.$.ItemTitle.setContent(pkg.title);
-            item.$.listItem.setIcon(pkg.icon);
+            item.$.listItem.setTitleAndIcon(pkg.title, pkg.icon);
             //the package itself, then the others
             item.$.listItem.setDivider(inEvent.index === 0 ? $L("Package") :
                     (inEvent.index > 1 ? "" : (c.type === "install" ? $L("Needs") : $L("Needed By"))));
@@ -848,8 +856,7 @@ enyo.kind({
         if (pkg && pkg.title) {
             this.setupDivider(inEvent.item, this.$.packagesMenu.availablePackages, inEvent.index,
                 this.$.packagesMenu.currentSort, this.listName === "all");
-            inEvent.item.$.listItem.$.ItemTitle.setContent(pkg.title);
-            inEvent.item.$.listItem.setIcon(pkg.icon);
+            inEvent.item.$.listItem.setTitleAndIcon(pkg.title, pkg.icon);
         }
         return true;
     }
