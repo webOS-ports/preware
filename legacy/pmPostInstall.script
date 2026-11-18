@@ -75,8 +75,10 @@ rm -f $APPS/usr/lib/ipkg/lists/appmuseum
 # Install PreCentral theme feed
 echo "src/gz precentral-themes http://ipkg.preware.net/feeds/precentral-themes" > $APPS/etc/ipkg/precentral-themes.conf
 
-# Install PivotCE feeds
-echo "src/gz pivotce http://feed.pivotce.com" > $APPS/etc/ipkg/pivotce.conf
+# Remove the PivotCE feed, which is no longer offered: on, off or pending,
+# with its downloaded package list
+rm -f $APPS/etc/ipkg/pivotce.conf $APPS/etc/ipkg/pivotce.conf.disabled $APPS/etc/ipkg/pivotce.conf.new
+rm -f $APPS/usr/lib/ipkg/lists/pivotce
 
 # Remove dead prethemer and clock-themes (Google Code) feeds
 rm -f $APPS/etc/ipkg/prethemer.conf $APPS/etc/ipkg/prethemer.conf.disabled $APPS/etc/ipkg/prethemer.conf.new

@@ -25,7 +25,6 @@ enyo.singleton({
         {config: "optware.conf", name: "optware", url: "http://ipkg.preware.net/feeds/optware/all", gzip: true},
         {config: "precentral-weboslives.conf", name: "precentral", url: "http://weboslives.eu/feeds/precentral", gzip: true},
         {config: "precentral-themes.conf", name: "precentral-themes", url: "http://ipkg.preware.net/feeds/precentral-themes", gzip: true},
-        {config: "pivotce.conf", name: "pivotce", url: "http://feed.pivotce.com", gzip: true},
         {config: "webos-internals.conf", name: "webosinternals", url: "http://ipkg.preware.net/feeds/webos-internals/all", gzip: true},
         {config: "woce.conf", name: "woce", url: "http://ipkg.preware.net/feeds/woce", gzip: true},
         {config: "modernize.conf", name: "modernize", url: "http://stacks.webosarchive.org/feeds/modernize/ipkgs", gzip: true}

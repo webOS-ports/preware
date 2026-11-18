@@ -53,8 +53,8 @@ launches with `{target: <ipk>}` or `{type: "install", file: <ipk>}` by showing t
 On LuneOS, which does not run the install scripts of app packages, Preware 2 adds the same default feeds
 itself at its first start (`source/model/luneosFeeds.js`), through `org.webosports.service.ipkg`. It keeps them
 in files named `preware2-*.conf`, and shows only its default feeds and the feeds added in Preware 2, not the
-other feeds LuneOS ships. A default feed LuneOS already ships (PivotCE) is used, and turned on, instead of
-being added a second time.
+other feeds LuneOS ships. A default feed LuneOS already ships is used, and turned on, instead of being added a
+second time.
 
 On both, `preware.ColumnPanels` (`source/ColumnPanels.js`) keeps the menu on the left and opens the other panels
 in columns to its right (in landscape the list stays next to the package details); on a phone it shows one

@@ -266,7 +266,7 @@ enyo.kind({
 	//feeds that are set up by default don't need a warning
 	//(the same ones on LuneOS, see preware.LuneOSFeeds).
 	isTrustedFeed: function (url) {
-		return /^https?:\/\/([a-z0-9\-]+\.)*(preware\.net|webosarchive\.org|weboslives\.eu|pivotce\.com)(:|\/)/.test(url);
+		return /^https?:\/\/([a-z0-9\-]+\.)*(preware\.net|webosarchive\.org|weboslives\.eu)(:|\/)/.test(url);
 	},
 	okFeedToggle: function (inSender, inEvent) {
     	this.$.warningDialog.hide();
